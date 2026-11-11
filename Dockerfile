@@ -11,10 +11,15 @@ RUN apt-get update \
 # CLI versions pinned per docs/cli-probe.md (Cursor installer is unpinned)
 RUN npm i -g @anthropic-ai/claude-code@2.1.322 @openai/codex@0.167.1 @google/gemini-cli@0.68.0
 RUN useradd -m -u 10001 -d /home/ayaan ayaan && mkdir -p /data && chown ayaan:ayaan /data
+# Cursor is installed with a throwaway HOME outside /home/ayaan, because compose mounts /home/ayaan
+RUN mkdir -p /opt/cursor && chown ayaan:ayaan /opt/cursor
 USER ayaan
-ENV HOME=/home/ayaan PATH=/home/ayaan/.local/bin:$PATH
-RUN curl https://cursor.com/install -fsS | bash
+RUN HOME=/opt/cursor sh -c 'curl https://cursor.com/install -fsS | bash'
 USER root
+RUN ln -s "$(readlink -f /opt/cursor/.local/bin/agent)" /usr/local/bin/agent \
+    && ln -s "$(readlink -f /opt/cursor/.local/bin/cursor-agent)" /usr/local/bin/cursor-agent \
+    && agent --version
+ENV HOME=/home/ayaan
 WORKDIR /app
 COPY pyproject.toml ./
 COPY ayaan ./ayaan

@@ -32,3 +32,19 @@ async def test_notify_retries_then_false():
     assert len(calls) == 4
     assert sleeps == [1, 5, 30]
     assert calls[0].headers["X-ECC-Token"] == "et"
+
+
+async def test_delete_workspace_204_returns_none():
+    t = httpx.MockTransport(lambda r: httpx.Response(204))
+    assert await QueryClient(S, transport=t).delete_workspace("p") is None
+
+
+async def test_notify_never_raises_on_unexpected_error():
+    def boom(r):
+        raise ValueError("boom")
+
+    async def sleep(s):
+        pass
+
+    client = EccClient(S, transport=httpx.MockTransport(boom), sleep=sleep)
+    assert await client.notify("e", "t", "b") is False

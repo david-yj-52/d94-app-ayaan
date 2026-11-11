@@ -21,7 +21,8 @@ class QueryClient:
         return resp
 
     async def _data(self, method: str, path: str, **kw):
-        return (await self._call(method, path, **kw)).json().get("data")
+        resp = await self._call(method, path, **kw)
+        return resp.json().get("data") if resp.content else None
 
     async def get_config(self) -> dict[str, str]:
         return await self._data("GET", "/config")
@@ -123,7 +124,7 @@ class EccClient:
                 resp = await self._http.post("/api/v1/notify", json=payload)
                 if resp.is_success:
                     return True
-            except httpx.HTTPError:
+            except Exception:  # notify must never raise
                 pass
             if delay is not None:
                 await self._sleep(delay)
