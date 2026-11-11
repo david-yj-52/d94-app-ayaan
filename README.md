@@ -34,6 +34,8 @@ API keys for `authMode=API_KEY` tools are plain env vars named by the tool's `ap
 
 ## Container user and bind mounts
 
+Run every setup command as `docker exec -u ayaan -it d94-app-ayaan …`: the image's default user is root (for the entrypoint), so a plain `docker exec` would write root-owned 0600 login/git files into `/home/ayaan` that uvicorn (uid 10001) cannot read.
+
 The image starts as root only for `docker/entrypoint.sh`: it creates `/home/ayaan`, `/data` and `/workspace`, `chown`s `/home/ayaan` and `/data` (recursive) and `/workspace` (top level only) to uid 10001, sets `git config --system safe.directory '*'` (host-owned repos under `/workspace`), then `exec setpriv` drops to `ayaan` (10001) for uvicorn and every CLI. So root-owned host directories no longer break `claude` login, logs/spool or git. Repos inside `/workspace` must be writable by uid 10001 (or group/other).
 
 ## FAKE로 중단·재개 시험하기

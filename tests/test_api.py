@@ -352,3 +352,11 @@ def test_lifespan_eureka_uses_async_api(tmp_path, monkeypatch):
     with TestClient(app):
         pass
     assert calls == [("init", "d94-app-ayaan"), ("stop",)]
+
+
+async def test_setup_probe_env_drops_ayaan_vars(monkeypatch):
+    from ayaan import setup_check
+
+    monkeypatch.setenv("AYAAN_JWT_SECRET_KEY", "k")
+    code, out = await setup_check._run("/usr/bin/env")
+    assert code == 0 and "GIT_TERMINAL_PROMPT=0" in out and "AYAAN_" not in out

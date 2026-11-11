@@ -9,7 +9,7 @@ import httpx
 
 from ayaan.adapters import TESTED_VERSIONS
 from ayaan.scheduler import EXE_MISSING
-from ayaan.settings import Settings, resolve_exe
+from ayaan.settings import Settings, child_env, resolve_exe
 
 TIMEOUT_S = 10
 # credential files written by each CLI's login, relative to HOME
@@ -40,7 +40,7 @@ async def _run(*args: str) -> tuple[int | None, str]:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**child_env(), "GIT_TERMINAL_PROMPT": "0"},
         )
     except OSError:
         return None, "not found"

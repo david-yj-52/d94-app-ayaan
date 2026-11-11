@@ -19,7 +19,7 @@ from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
 from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at
 from ayaan.runner import RunResult, kill_task, pending_spool, run_cli, write_spool
-from ayaan.settings import resolve_exe
+from ayaan.settings import child_env, resolve_exe
 
 log = logging.getLogger(__name__)
 
@@ -353,14 +353,9 @@ class Scheduler:
                 await self.sleep(delay)
 
     def _env(self, tool: dict) -> dict:
-        # ponytail: AYAAN_* (tokens, JWT key) never reach the CLI env; residual risk: the CLI runs
-        # as the same uid and can still read /proc/1/environ. Upgrade path: a separate uid for CLIs.
+        # ponytail: AYAAN_* never reach the CLI (residual risk and upgrade path: see child_env)
         fake = FAKE_ENV if tool["toolCd"] == "FAKE" else ()  # non-secret FAKE scenario inputs
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if k not in KEY_ENV.values() and (not k.startswith("AYAAN_") or k in fake)
-        }
+        env = {k: v for k, v in child_env(fake).items() if k not in KEY_ENV.values()}
         if tool.get("authMode") == "API_KEY" and tool["toolCd"] in KEY_ENV:
             env[KEY_ENV[tool["toolCd"]]] = os.environ[tool["apiKeyRef"]]  # never logged
         return env

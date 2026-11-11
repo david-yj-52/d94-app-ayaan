@@ -64,6 +64,13 @@ DEFAULT_EXE = {
 }
 
 
+def child_env(keep: tuple[str, ...] = ()) -> dict[str, str]:
+    """os.environ for CLI/probe children without AYAAN_* (tokens, JWT key), except `keep`.
+    ponytail: residual risk, children run as the same uid and can read /proc/1/environ;
+    upgrade path is a separate uid for CLIs."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("AYAAN_") or k in keep}
+
+
 def resolve_exe(name: str, settings: Settings) -> str | None:
     """Absolute path of a tool CLI (or git): AYAAN_CLI_EXECUTABLES override, else PATH lookup.
     Relative results are rejected: CLIs are only ever run by absolute path."""
