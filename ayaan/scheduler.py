@@ -11,19 +11,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 from croniter import croniter
 
-from ayaan.adapters import ADAPTERS
+from ayaan.adapters import ADAPTERS, RunEvent
 from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
 from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at
-from ayaan.runner import kill_task, pending_spool, run_cli, write_spool
+from ayaan.runner import RunResult, kill_task, pending_spool, run_cli, write_spool
 
 log = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 LEASE_S = 180
 LEASE_EXTEND_S = 60
+SETTLE_BACKOFF = (5, 15, 30, 60)  # then every 60 s
 RESUME_PROMPT = "중단된 작업을 이어서 진행해. 작업공간의 현재 상태를 먼저 확인해."
 SWITCH_NOTE = "\n\n작업공간에 이전 Tool이 진행한 변경사항이 있다. 먼저 확인하고 이어서 진행해."
 DEFAULT_EXE = {"claude": "claude", "codex": "codex", "gemini": "gemini", "cursor": "cursor-agent"}
@@ -134,6 +136,9 @@ class Scheduler:
         self._tasks: set[asyncio.Task] = set()
         self._loops: list[asyncio.Task] = []
         self._wake = asyncio.Event()
+        self._active: set[str] = set()  # task ids inside _execute in this process
+        self._lost: set[str] = set()  # task ids whose lease is no longer ours
+        self.sleep = asyncio.sleep  # settle backoff; injectable for tests
 
     # ── notifications ──
     async def _config(self) -> dict:
@@ -238,8 +243,20 @@ class Scheduler:
     async def _recover(self) -> None:
         # Also runs every tick: a restart shorter than the lease leaves RUNNING rows that are
         # not yet expired at boot. Recovered tasks are requeued so the next tick resumes them.
+        # An expired lease on a task this process is still running (query outage > lease) is
+        # taken straight back instead of requeued, so it is never claimed and run twice.
+        now = self.clock()
         for tid in await self.query.recover() or []:
-            await self.query.transition(tid, "PAUSED", "QUEUED", resumeAt=to_query_ts(self.clock()))
+            if tid in self._active:
+                await self.query.transition(
+                    tid,
+                    "PAUSED",
+                    "RUNNING",
+                    leaseOwner=self.owner,
+                    leaseUntil=to_query_ts(now + timedelta(seconds=LEASE_S)),
+                )
+            else:
+                await self.query.transition(tid, "PAUSED", "QUEUED", resumeAt=to_query_ts(now))
 
     async def tick(self) -> None:
         await self._recover()
@@ -257,6 +274,7 @@ class Scheduler:
                 if not task:
                     break
                 self.running[cd] += 1
+                self._active.add(task["id"])
                 t = asyncio.create_task(self._execute(task, tool))
                 self._tasks.add(t)
                 t.add_done_callback(self._tasks.discard)
@@ -284,6 +302,7 @@ class Scheduler:
     # ── execution ──
     async def _execute(self, task: dict, tool: dict) -> None:
         tid, cd = task["id"], task["toolCd"]
+        lease = asyncio.create_task(self._keep_lease(tid))  # held until settle is done
         try:
             cfg = await self._config()
             session = task.get("cliSessionId")
@@ -299,7 +318,7 @@ class Scheduler:
             if session and retry:
                 session = None  # the old session is gone: one fresh run on the same tool
                 res, rows = await self._run_once(task, tool, cfg, None)
-            await self._settle(task, res, rows, res.event.session_id or session)
+            await self._settle_retrying(task, res, rows, res.event.session_id or session)
         except Exception as e:
             log.exception("execute %s failed", tid)
             with contextlib.suppress(Exception):
@@ -311,7 +330,25 @@ class Scheduler:
                     finishedAt=to_query_ts(self.clock()),
                 )
         finally:
+            lease.cancel()
             self.running[cd] -= 1
+            self._active.discard(tid)
+            self._lost.discard(tid)
+
+    async def _settle_retrying(self, task, res, rows, sid) -> None:
+        """Query transport errors retry with backoff while the lease is still ours."""
+        attempt = 0
+        while True:
+            try:
+                return await self._settle(task, res, rows, sid)
+            except httpx.HTTPError:
+                if task["id"] in self._lost:
+                    log.warning("settle of %s abandoned: lease lost", task["id"])
+                    return
+                delay = SETTLE_BACKOFF[min(attempt, len(SETTLE_BACKOFF) - 1)]
+                log.warning("settle of %s failed; retry in %ss", task["id"], delay, exc_info=True)
+                attempt += 1
+                await self.sleep(delay)
 
     def _env(self, tool: dict) -> dict:
         env = {k: v for k, v in os.environ.items() if k not in KEY_ENV.values()}
@@ -327,7 +364,14 @@ class Scheduler:
             except Exception:
                 log.warning("lease extend failed for %s", tid, exc_info=True)
                 continue  # transient: the lease outlives two missed extensions
-            if not ok:  # cancelled or taken over: stop the process
+            if not ok:
+                # recover() may have flipped our own task to PAUSED a moment before _recover
+                # takes it back: only a task that is no longer RUNNING under us is lost
+                with contextlib.suppress(Exception):
+                    t = await self.query.get_task(tid) or {}
+                    if t.get("status") == "RUNNING" and t.get("leaseOwner") == self.owner:
+                        continue
+                self._lost.add(tid)  # cancelled or taken over: stop the process
                 kill_task(tid)
                 return
 
@@ -348,7 +392,6 @@ class Scheduler:
         log_path = data_dir / "logs" / tid / f"{seq}.log"
         env = self._env(tool)
         run = await self.query.start_run(tid, seq, cd)
-        lease = asyncio.create_task(self._keep_lease(tid))
         try:
             res = await self.runner(
                 tool=cd,
@@ -361,8 +404,9 @@ class Scheduler:
                 env=env,
                 task_id=tid,
             )
-        finally:
-            lease.cancel()
+        except Exception as e:  # still close the run record
+            log.exception("runner failed for %s", tid)
+            res = RunResult("FAILED", RunEvent(), None, f"{type(e).__name__}: {e}")
         ev, now = res.event, self.clock()
         body = {
             "outcome": res.outcome,
@@ -397,7 +441,9 @@ class Scheduler:
         if tool.get("authMode") != "API_KEY" or not tool.get("budgetTokens"):
             return None
         # ponytail: running total = current BUDGET row usedTokens + this run (no per-period
-        # token sum endpoint in d94-query); a row whose reset passed starts a new period
+        # token sum endpoint in d94-query); a row whose reset passed starts a new period.
+        # Read-modify-write: concurrent runs on the same API_KEY tool may lose increments;
+        # upgrade path is a query-side per-period SUM over TASK_RUN.
         prev = next(
             (
                 r
@@ -455,6 +501,15 @@ class Scheduler:
                 [{"label": "재시도", "action": "resume", "taskId": t["id"]}],
             )
 
+    @staticmethod
+    def _free(tool: str, quotas: list[dict], now: datetime, grace: int) -> bool:
+        # EXHAUSTED with no known reset counts as not free for switching
+        unknown = any(
+            r.get("toolCd") == tool and r.get("status") == "EXHAUSTED" and not r.get("resetsAt")
+            for r in quotas
+        )
+        return not unknown and not _blocking(tool, quotas, now, grace)
+
     async def _on_limit(self, task, cfg, ev, rows, sid, now) -> None:
         tid, cd = task["id"], task["toolCd"]
         count, mx = (task.get("resumeCount") or 0) + 1, _int(cfg, "MAX_RESUME_COUNT", 10)
@@ -474,8 +529,14 @@ class Scheduler:
         if policy == "SWITCH_TOOL":
             quotas = await self.query.get_quotas() or []
             grace = _int(cfg, "RESUME_GRACE_SEC", 120)
-            others = [c for c in cands if c != cd and tools.get(c, {}).get("enabled")]
-            free = next((c for c in others if not _blocking(c, quotas, now, grace)), None)
+            others = [
+                c
+                for c in cands
+                if c != cd
+                and tools.get(c, {}).get("enabled")
+                and (c != "FAKE" or self.settings.fake_enabled)
+            ]
+            free = next((c for c in others if self._free(c, quotas, now, grace)), None)
             if free:
                 t = await self.query.transition(
                     tid, "RUNNING", "QUEUED", toolCd=free, cliSessionId=None, **fields

@@ -208,7 +208,13 @@ class InMemoryQuery:
         for t in self.tasks.values():
             expired = t["leaseUntil"] and from_query_ts(t["leaseUntil"]) < now
             if t["status"] == "RUNNING" and expired:
-                t.update(status="PAUSED", pauseReason="RECOVERED", resumeAt=to_query_ts(now))
+                t.update(
+                    status="PAUSED",
+                    pauseReason="RECOVERED",
+                    resumeAt=to_query_ts(now),
+                    leaseOwner=None,
+                    leaseUntil=None,
+                )
                 ids.append(t["id"])
         return ids
 

@@ -1,6 +1,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from fakes import (
     FakeClock,
@@ -361,3 +362,67 @@ async def test_start_stop_runs_tick_and_survives_errors(settings):
     await s.drain()
     await s.stop()
     assert len(runner.calls) == 1
+
+
+async def test_recover_does_not_steal_own_live_task(settings):
+    gate = asyncio.Event()
+    q, ecc, clock, runner, s = _setup([ok_result("a"), ok_result("x")], settings, gate=gate)
+    q.tools["CLAUDE"]["maxConcurrency"] = 2
+    tid = q.add_task(tool="CLAUDE")
+    await s.tick()
+    await asyncio.sleep(0.01)
+    q.tasks[tid]["leaseUntil"] = to_query_ts(NOW - timedelta(seconds=1))  # query was down
+    await s.tick()
+    await asyncio.sleep(0.01)
+    assert len(runner.calls) == 1
+    t = q.task(tid)
+    assert (t["status"], t["leaseOwner"]) == ("RUNNING", s.owner)
+    gate.set()
+    await s.drain()
+    assert q.task(tid)["status"] == "DONE"
+
+
+async def test_settle_retries_through_query_outage(settings):
+    q, ecc, clock, runner, s = _setup([ok_result("s7")], settings)
+    slept = []
+
+    async def no_sleep(sec):
+        slept.append(sec)
+
+    s.sleep = no_sleep
+    real, fails = q.transition, {"n": 2}
+
+    async def flaky(*a, **kw):
+        if fails["n"]:
+            fails["n"] -= 1
+            raise httpx.ConnectError("down")
+        return await real(*a, **kw)
+
+    q.transition = flaky
+    tid = q.add_task(tool="CLAUDE")
+    await s.tick()
+    await s.drain()
+    t = q.task(tid)
+    assert (t["status"], t["cliSessionId"]) == ("DONE", "s7")
+    assert slept == [5, 15]
+
+
+async def test_runner_exception_still_finishes_run(settings):
+    q, ecc, clock, runner, s = _setup([], settings)  # empty script: runner raises IndexError
+    tid = q.add_task(tool="CLAUDE")
+    await s.tick()
+    await s.drain()
+    assert q.runs["r1"]["outcome"] == "FAILED"
+    assert q.task(tid)["status"] == "FAILED" and "IndexError" in q.task(tid)["failReason"]
+
+
+async def test_switch_skips_exhausted_without_reset_and_fake(settings):
+    q, ecc, clock, runner, s = _setup([limit_result("s1", NOW + timedelta(hours=1))], settings)
+    s.settings = Settings(_env_file=None, data_dir=settings.data_dir, profile="")
+    q.tools["CODEX"]["enabled"] = q.tools["FAKE"]["enabled"] = True
+    await q.put_quota("CODEX", "WEEKLY", {"status": "EXHAUSTED", "resetsAt": None})
+    tid = q.add_task(tool="CLAUDE", exhaustPolicy="SWITCH_TOOL", fallbackTools="CODEX,FAKE")
+    await s.tick()
+    await s.drain()
+    t = q.task(tid)
+    assert (t["status"], t["toolCd"]) == ("PAUSED", "CLAUDE")
