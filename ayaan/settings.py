@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     eureka_instance_host: str = "d94-app-ayaan"
     eureka_instance_port: int = 8080
     service_name: str = "d94-app-ayaan"
+    claude_credentials_path: str = "/home/ayaan/.claude/.credentials.json"
+    codex_sessions_dir: str = "/home/ayaan/.codex/sessions"
 
     @property
     def workspace_root_paths(self) -> tuple[Path, ...]:

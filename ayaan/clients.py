@@ -1,8 +1,22 @@
 import asyncio
+from datetime import UTC, datetime
 
 import httpx
 
 from ayaan.settings import Settings
+
+
+def to_query_ts(dt: datetime) -> str:
+    """Naive-UTC string d94-query (Java LocalDateTime) accepts."""
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def from_query_ts(s: str) -> datetime:
+    """Parse a timestamp as UTC; accepts with or without Z/offset/fraction."""
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 class QueryClient:
