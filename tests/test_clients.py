@@ -48,3 +48,10 @@ async def test_notify_never_raises_on_unexpected_error():
 
     client = EccClient(S, transport=httpx.MockTransport(boom), sleep=sleep)
     assert await client.notify("e", "t", "b") is False
+
+
+async def test_path_params_are_quoted():
+    seen = []
+    t = httpx.MockTransport(lambda r: seen.append(r.url.raw_path) or httpx.Response(404))
+    await QueryClient(S, transport=t).issue_by_key("../tasks?x=1")
+    assert seen[0].endswith(b"/issues/by-key/..%2Ftasks%3Fx%3D1")

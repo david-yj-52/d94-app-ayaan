@@ -230,3 +230,45 @@ def test_test_notify(env):
     c, ecc = env[0], env[2]
     r = c.post(f"{P}/setup/test-notify", headers=TOKEN)
     assert r.json() == {"success": True, "data": True} and ecc.events() == ["TEST"]
+
+
+def test_setup_check_reports_missing_executable(env):
+    c, settings = env[0], env[4]
+    settings.cli_executables = "claude=claude"  # relative: rejected
+    steps = c.get(f"{P}/setup/check", headers=TOKEN).json()["data"]
+    item = next(i for i in steps[0]["items"] if i["name"] == "CLAUDE version")
+    assert item == {"name": "CLAUDE version", "ok": False, "detail": "실행 파일을 찾을 수 없음"}
+
+
+def test_jwt_alg_none_hs512_and_missing_exp_rejected(env):
+    c = env[0]
+    exp = int(time.time()) + 60
+    none_tok = jwt.encode({"sub": "u", "exp": exp}, None, algorithm="none")
+    hs512 = jwt.encode({"sub": "u", "exp": exp}, b"k" * 64, algorithm="HS512")
+    no_exp = jwt.encode({"sub": "u"}, b"k" * 32, algorithm="HS256")
+    for tok in (none_tok, hs512, no_exp):
+        r = c.get(f"{P}/tasks", headers={"Authorization": f"Bearer {tok}"})
+        assert r.status_code == 401
+
+
+def test_invalid_source_400(env):
+    c = env[0]
+    r = c.post(f"{P}/tasks", json={"issueKey": "CIRA-1", "source": "EVIL"}, headers=TOKEN)
+    assert r.status_code == 400 and r.json()["success"] is False
+
+
+def test_missing_task_from_query_502(env):
+    c, q = env[0], env[1]
+
+    async def none(*a, **k):
+        return None
+
+    q.get_task = none
+    r = c.get(f"{P}/tasks/x", headers=TOKEN)
+    assert r.status_code == 502 and r.json()["success"] is False and r.json()["message"]
+
+
+def test_docs_disabled(env):
+    c = env[0]
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert c.get(path).status_code == 404

@@ -1,9 +1,15 @@
 import asyncio
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import httpx
 
 from ayaan.settings import Settings
+
+
+def _q(part) -> str:
+    """One URL path segment: ids and keys may not add segments or a query string."""
+    return quote(str(part), safe="")
 
 
 def to_query_ts(dt: datetime) -> str:
@@ -48,22 +54,22 @@ class QueryClient:
         return await self._data("GET", "/tools")
 
     async def put_tool(self, cd: str, body: dict):
-        return await self._data("PUT", f"/tools/{cd}", json=body)
+        return await self._data("PUT", f"/tools/{_q(cd)}", json=body)
 
     async def get_workspaces(self) -> list[dict]:
         return await self._data("GET", "/workspaces")
 
     async def put_workspace(self, key: str, body: dict):
-        return await self._data("PUT", f"/workspaces/{key}", json=body)
+        return await self._data("PUT", f"/workspaces/{_q(key)}", json=body)
 
     async def delete_workspace(self, key: str):
-        return await self._data("DELETE", f"/workspaces/{key}")
+        return await self._data("DELETE", f"/workspaces/{_q(key)}")
 
     async def get_quotas(self) -> list[dict]:
         return await self._data("GET", "/quotas")
 
     async def put_quota(self, tool: str, window: str, body: dict):
-        return await self._data("PUT", f"/quotas/{tool}/{window}", json=body)
+        return await self._data("PUT", f"/quotas/{_q(tool)}/{_q(window)}", json=body)
 
     async def create_task(self, body: dict) -> tuple[int, dict]:
         resp = await self._call("POST", "/tasks", ok=(201, 409), json=body)
@@ -74,11 +80,13 @@ class QueryClient:
         return await self._data("GET", "/tasks", params=params)
 
     async def get_task(self, task_id: str) -> dict:
-        return await self._data("GET", f"/tasks/{task_id}")
+        return await self._data("GET", f"/tasks/{_q(task_id)}")
 
     async def transition(self, task_id: str, expected: str, next: str, **fields) -> dict | None:
         body = {"expectedStatus": expected, "nextStatus": next, "fields": fields}
-        resp = await self._call("POST", f"/tasks/{task_id}/transition", ok=(200, 409), json=body)
+        resp = await self._call(
+            "POST", f"/tasks/{_q(task_id)}/transition", ok=(200, 409), json=body
+        )
         return resp.json().get("data") if resp.status_code == 200 else None
 
     async def claim(self, tool: str, owner: str, lease_s: int, grace_s: int) -> dict | None:
@@ -93,7 +101,7 @@ class QueryClient:
 
     async def extend_lease(self, task_id: str, owner: str, lease_s: int) -> bool:
         body = {"leaseOwner": owner, "leaseSeconds": lease_s}
-        resp = await self._call("POST", f"/tasks/{task_id}/lease", ok=(200, 409), json=body)
+        resp = await self._call("POST", f"/tasks/{_q(task_id)}/lease", ok=(200, 409), json=body)
         return resp.status_code == 200
 
     async def recover(self) -> list[str]:
@@ -101,14 +109,14 @@ class QueryClient:
 
     async def start_run(self, task_id: str, run_seq: int, tool: str) -> dict:
         return await self._data(
-            "POST", f"/tasks/{task_id}/runs", json={"runSeq": run_seq, "toolCd": tool}
+            "POST", f"/tasks/{_q(task_id)}/runs", json={"runSeq": run_seq, "toolCd": tool}
         )
 
     async def finish_run(self, run_id: str, body: dict):
-        return await self._data("PUT", f"/runs/{run_id}", json=body)
+        return await self._data("PUT", f"/runs/{_q(run_id)}", json=body)
 
     async def issue_by_key(self, key: str) -> dict | None:
-        resp = await self._call("GET", f"/issues/by-key/{key}", ok=(200, 404))
+        resp = await self._call("GET", f"/issues/by-key/{_q(key)}", ok=(200, 404))
         return resp.json().get("data") if resp.status_code == 200 else None
 
 

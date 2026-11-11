@@ -34,6 +34,7 @@ from ayaan.setup_check import run_setup_check
 log = logging.getLogger(__name__)
 
 PREFIX = "/tsh/api/v1/ayaan"
+SOURCES = {"TELEGRAM", "API", "WEB", "CIRA"}
 DEFAULT_TEMPLATE = (
     "CIRA 이슈 {issueKey}: {title}\n\n{content}\n\n"
     "위 이슈를 구현하고 테스트·빌드를 통과시킨 뒤, "
@@ -61,7 +62,9 @@ def ok(data: Any) -> dict:
     return {"success": True, "data": data}
 
 
-def _task(t: dict) -> dict:
+def _task(t: dict | None) -> dict:
+    if not t:
+        raise ApiError(502, "d94-query returned no task")
     if "objId" in t:
         t["id"] = t.pop("objId")
     return t
@@ -146,7 +149,14 @@ def create_app(
                 pass
         raise ApiError(401, "unauthorized")
 
-    app = FastAPI(title="D94 Ayaan", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="D94 Ayaan",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.settings, app.state.query, app.state.ecc = settings, query, ecc
     app.state.scheduler = scheduler
 
@@ -184,6 +194,8 @@ def create_app(
     # ── tasks ──
     @r.post("/tasks", status_code=201)
     async def create_task(req: TaskReq):
+        if req.source not in SOURCES:
+            raise ApiError(400, f"source must be one of {sorted(SOURCES)}")
         cfg = await query.get_config() or {}
         issue = None
         if req.issueKey:

@@ -1,3 +1,5 @@
+import os
+import shutil
 from functools import lru_cache
 from pathlib import Path
 
@@ -46,3 +48,20 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+DEFAULT_EXE = {
+    "claude": "claude",
+    "codex": "codex",
+    "gemini": "gemini",
+    "cursor": "cursor-agent",
+    "git": "git",
+}
+
+
+def resolve_exe(name: str, settings: Settings) -> str | None:
+    """Absolute path of a tool CLI (or git): AYAAN_CLI_EXECUTABLES override, else PATH lookup.
+    Relative results are rejected: CLIs are only ever run by absolute path."""
+    key = name.lower()
+    found = settings.executable_map.get(key) or shutil.which(DEFAULT_EXE.get(key, key))
+    return found if found and os.path.isabs(found) else None

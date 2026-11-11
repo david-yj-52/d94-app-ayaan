@@ -8,8 +8,8 @@ from urllib.parse import urlsplit
 import httpx
 
 from ayaan.adapters import TESTED_VERSIONS
-from ayaan.scheduler import DEFAULT_EXE
-from ayaan.settings import Settings
+from ayaan.scheduler import EXE_MISSING
+from ayaan.settings import Settings, resolve_exe
 
 TIMEOUT_S = 10
 # credential files written by each CLI's login, relative to HOME
@@ -62,7 +62,9 @@ async def _http(url: str, headers: dict | None = None) -> tuple[bool, str]:
         return False, type(e).__name__
 
 
-async def _version(cd: str, exe: str) -> dict:
+async def _version(cd: str, exe: str | None) -> dict:
+    if exe is None:
+        return _item(f"{cd} version", False, EXE_MISSING)
     code, out = await _run(exe, "--version")
     tested = TESTED_VERSIONS.get(cd, "unverified")
     if code != 0:
@@ -72,12 +74,14 @@ async def _version(cd: str, exe: str) -> dict:
     return _item(f"{cd} version", ok, f"installed {installed}, tested {tested}")
 
 
-async def _git(ws: dict) -> dict:
+async def _git(ws: dict, git: str | None) -> dict:
     path = Path(ws.get("workspacePath") or "")
     name = ws.get("projectKey") or str(path)
     if not path.is_dir():
         return _item(name, False, "workspace path does not exist")
-    code, _ = await _run("git", "-C", str(path), "ls-remote", "--exit-code", "origin")
+    if git is None:
+        return _item(name, False, EXE_MISSING)
+    code, _ = await _run(git, "-C", str(path), "ls-remote", "--exit-code", "origin")
     # output is never returned: a remote error can echo a URL with embedded credentials
     return _item(name, code == 0, "git ls-remote ok" if code == 0 else "git ls-remote failed")
 
@@ -92,11 +96,7 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
 
     # 1. CLI version + login
     cli = [t for t in enabled if t["toolCd"] != "FAKE"]
-    exes = {
-        t["toolCd"]: settings.executable_map.get(t["toolCd"].lower())
-        or DEFAULT_EXE[t["toolCd"].lower()]
-        for t in cli
-    }
+    exes = {t["toolCd"]: resolve_exe(t["toolCd"], settings) for t in cli}
     step1 = list(await asyncio.gather(*(_version(cd, exe) for cd, exe in exes.items())))
     for t in cli:
         if t.get("authMode") != "API_KEY":
@@ -114,7 +114,8 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
             step2.append(_item(t["toolCd"], present, f"{ref} {'set' if present else 'missing'}"))
 
     # 3. workspace path + git remote
-    step3 = list(await asyncio.gather(*(_git(w) for w in workspaces)))
+    git = resolve_exe("git", settings)
+    step3 = list(await asyncio.gather(*(_git(w, git) for w in workspaces)))
 
     # 4. ECC health, 5. via gateway
     ecc_ok, ecc_detail = await _http(f"{settings.ecc_base_url.rstrip('/')}/actuator/health")

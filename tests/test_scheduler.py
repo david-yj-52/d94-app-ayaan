@@ -24,7 +24,8 @@ NOW = datetime(2026, 11, 11, 3, 0, tzinfo=UTC)  # 12:00 KST
 
 @pytest.fixture
 def settings(tmp_path):
-    return Settings(_env_file=None, data_dir=str(tmp_path), profile="test")
+    exes = ",".join(f"{t}=/opt/cli/{t}" for t in ("claude", "codex", "gemini", "cursor"))
+    return Settings(_env_file=None, data_dir=str(tmp_path), profile="test", cli_executables=exes)
 
 
 def _setup(script, settings, ecc=None, gate=None):
@@ -418,7 +419,7 @@ async def test_runner_exception_still_finishes_run(settings):
 
 async def test_switch_skips_exhausted_without_reset_and_fake(settings):
     q, ecc, clock, runner, s = _setup([limit_result("s1", NOW + timedelta(hours=1))], settings)
-    s.settings = Settings(_env_file=None, data_dir=settings.data_dir, profile="")
+    s.settings = settings.model_copy(update={"profile": ""})
     q.tools["CODEX"]["enabled"] = q.tools["FAKE"]["enabled"] = True
     await q.put_quota("CODEX", "WEEKLY", {"status": "EXHAUSTED", "resetsAt": None})
     tid = q.add_task(tool="CLAUDE", exhaustPolicy="SWITCH_TOOL", fallbackTools="CODEX,FAKE")
@@ -426,3 +427,14 @@ async def test_switch_skips_exhausted_without_reset_and_fake(settings):
     await s.drain()
     t = q.task(tid)
     assert (t["status"], t["toolCd"]) == ("PAUSED", "CLAUDE")
+
+
+async def test_unresolvable_executable_fails_task(settings):
+    settings.cli_executables = "claude=relative/claude"
+    q, ecc, clock, runner, s = _setup([ok_result("s1")], settings)
+    tid = q.add_task()
+    await s.tick()
+    await s.drain()
+    assert runner.calls == []
+    assert q.task(tid)["status"] == "FAILED"
+    assert "실행 파일을 찾을 수 없음" in q.task(tid)["failReason"]

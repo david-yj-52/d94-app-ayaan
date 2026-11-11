@@ -19,6 +19,7 @@ from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
 from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at
 from ayaan.runner import RunResult, kill_task, pending_spool, run_cli, write_spool
+from ayaan.settings import resolve_exe
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ LEASE_EXTEND_S = 60
 SETTLE_BACKOFF = (5, 15, 30, 60)  # then every 60 s
 RESUME_PROMPT = "중단된 작업을 이어서 진행해. 작업공간의 현재 상태를 먼저 확인해."
 SWITCH_NOTE = "\n\n작업공간에 이전 Tool이 진행한 변경사항이 있다. 먼저 확인하고 이어서 진행해."
-DEFAULT_EXE = {"claude": "claude", "codex": "codex", "gemini": "gemini", "cursor": "cursor-agent"}
+EXE_MISSING = "실행 파일을 찾을 수 없음"
 KEY_ENV = {
     "CLAUDE": "ANTHROPIC_API_KEY",
     "CODEX": "OPENAI_API_KEY",
@@ -384,29 +385,29 @@ class Scheduler:
             argv, prompt = adapter.resume_argv(session, model), RESUME_PROMPT
         else:  # earlier runs without a session to resume: another tool/session left changes
             argv, prompt = adapter.new_argv(model), task["prompt"] + (SWITCH_NOTE if runs else "")
-        if cd == "FAKE":
-            exe = sys.executable
-        else:
-            exe = self.settings.executable_map.get(cd.lower()) or DEFAULT_EXE[cd.lower()]
+        exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)
         data_dir = Path(self.settings.data_dir)
         log_path = data_dir / "logs" / tid / f"{seq}.log"
         env = self._env(tool)
         run = await self.query.start_run(tid, seq, cd)
-        try:
-            res = await self.runner(
-                tool=cd,
-                argv_tail=argv,
-                prompt=prompt,
-                cwd=Path(task["workspacePath"]),
-                timeout_s=_int(cfg, "TASK_TIMEOUT_SEC", 1800),
-                log_path=log_path,
-                executable=exe,
-                env=env,
-                task_id=tid,
-            )
-        except Exception as e:  # still close the run record
-            log.exception("runner failed for %s", tid)
-            res = RunResult("FAILED", RunEvent(), None, f"{type(e).__name__}: {e}")
+        if exe is None:  # not installed, or override not absolute
+            res = RunResult("FAILED", RunEvent(), None, f"{EXE_MISSING}: {cd}")
+        else:
+            try:
+                res = await self.runner(
+                    tool=cd,
+                    argv_tail=argv,
+                    prompt=prompt,
+                    cwd=Path(task["workspacePath"]),
+                    timeout_s=_int(cfg, "TASK_TIMEOUT_SEC", 1800),
+                    log_path=log_path,
+                    executable=exe,
+                    env=env,
+                    task_id=tid,
+                )
+            except Exception as e:  # still close the run record
+                log.exception("runner failed for %s", tid)
+                res = RunResult("FAILED", RunEvent(), None, f"{type(e).__name__}: {e}")
         ev, now = res.event, self.clock()
         body = {
             "outcome": res.outcome,
