@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -10,7 +10,7 @@ import httpx
 
 from ayaan.adapters import RunEvent
 from ayaan.clients import EccClient, QueryClient, from_query_ts, to_query_ts
-from ayaan.rules import next_reset, resolve_resume_at
+from ayaan.rules import resolve_resume_at
 from ayaan.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -96,10 +96,17 @@ def collect_codex(sessions_dir: Path) -> list[dict]:
         return []
     latest = max(files, key=lambda f: f.stat().st_mtime)
     limits = None
-    for line in latest.read_text().splitlines():
+    try:
+        lines = latest.read_text().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("codex session log unreadable: %s", type(e).__name__)
+        return []
+    for line in lines:
         try:
             o = json.loads(line)
         except ValueError:
+            continue
+        if not isinstance(o, dict):
             continue
         p = o.get("payload") or {}
         if p.get("type") == "token_count":
@@ -135,7 +142,12 @@ def quotas_from_event(tool: str, ev: RunEvent, rule: str, now: datetime) -> list
         w = next((k for k, r in rows.items() if r["status"] == "EXHAUSTED"), None)
         if w is None:
             w = next(iter(rows), "DAILY") if len(rows) == 1 else "DAILY"
-        at = resolve_resume_at(ev.resets_at, rule, now)
+        try:
+            at = resolve_resume_at(ev.resets_at, rule, now)
+        except (
+            ValueError
+        ):  # ponytail: bad FALLBACK_RESET_RULE -> retry in 30 min, no per-rule recovery
+            at = now + timedelta(minutes=30)
         rows[w] = {**_row(tool, w, 100.0, at, "LIMIT_ERROR", now), "status": "EXHAUSTED"}
     return list(rows.values())
 
@@ -145,7 +157,14 @@ def budget_quota(tool_row: dict, period_tokens: int, now: datetime) -> dict | No
     if tool_row.get("authMode") != "API_KEY" or not budget:
         return None
     exceeded = period_tokens >= budget
-    at = next_reset(tool_row.get("budgetPeriod") or tool_row.get("fallbackResetRule") or "", now)
+    today = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    period = tool_row.get("budgetPeriod")
+    if period == "DAILY":
+        at = today + timedelta(days=1)
+    elif period == "MONTHLY":
+        at = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+    else:
+        return None
     row = _row(
         tool_row["toolCd"],
         "BUDGET",
@@ -206,7 +225,8 @@ async def collect_all(
     events = {e.strip() for e in cfg.get("NOTIFY_EVENTS", "").split(",") if e.strip()}
     tools = {t["toolCd"]: t for t in await query.get_tools() or []}
 
-    # expire stale EXHAUSTED rows first (apply sees prev status, so restores notify nothing wrongly)
+    # persist EXHAUSTED -> UNKNOWN for rows whose reset has passed (no notification; the next
+    # collected/observed row settles the real status)
     current = await query.get_quotas() or []
     for old, new in zip(current, expire_past_resets(current, now)):
         if new["status"] != old["status"]:

@@ -79,8 +79,13 @@ class Claude:
     tool = "CLAUDE"
 
     def _base(self, model):
-        argv = ["-p", "--output-format", "stream-json", "--verbose",
-                "--dangerously-skip-permissions"]
+        argv = [
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ]
         return argv + (["--model", model] if model else [])
 
     def new_argv(self, model):
@@ -126,12 +131,18 @@ class Codex:
     _FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 
     def new_argv(self, model):
-        return (["exec"] + self._FLAGS + ["--skip-git-repo-check"]
-                + (["-m", model] if model else []) + ["-"])
+        return (
+            ["exec"]
+            + self._FLAGS
+            + ["--skip-git-repo-check"]
+            + (["-m", model] if model else [])
+            + ["-"]
+        )
 
     def resume_argv(self, session_id, model):
-        return ["exec", "resume", session_id] + self._FLAGS + (
-            ["-m", model] if model else []) + ["-"]
+        return (
+            ["exec", "resume", session_id] + self._FLAGS + (["-m", model] if model else []) + ["-"]
+        )
 
     def parse(self, lines):
         objs, plain = _scan(lines)
@@ -204,7 +215,8 @@ class Cursor:
 
     def _base(self, model):
         return ["-p", "--force", "--output-format", "stream-json"] + (
-            ["--model", model] if model else [])
+            ["--model", model] if model else []
+        )
 
     def new_argv(self, model):
         return self._base(model)

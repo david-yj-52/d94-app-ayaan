@@ -140,12 +140,33 @@ def test_limit_event_sets_exhausted_with_rule():
 
 
 def test_budget_exceeded_until_next_period():
-    t = {"toolCd": "X", "authMode": "API_KEY", "budgetTokens": 1000, "budgetPeriod": "MONTHLY 1"}
+    t = {"toolCd": "X", "authMode": "API_KEY", "budgetTokens": 1000, "budgetPeriod": "MONTHLY"}
     row = budget_quota(t, 1500, NOW)
     assert row["windowCd"] == "BUDGET" and row["status"] == "EXHAUSTED"
     assert row["resetsAt"] == "2026-12-01T00:00:00" and row["source"] == "ACCOUNTING"
     assert budget_quota(t, 10, NOW)["status"] == "AVAILABLE"
     assert budget_quota({**t, "authMode": "ACCOUNT"}, 1, NOW) is None
+    daily = budget_quota({**t, "budgetPeriod": "DAILY"}, 1, NOW)
+    assert daily["resetsAt"] == "2026-11-12T00:00:00"
+    dec = budget_quota(t, 1, datetime(2026, 12, 31, 23, tzinfo=UTC))
+    assert dec["resetsAt"] == "2027-01-01T00:00:00"
+
+
+def test_budget_unknown_period_returns_none():
+    t = {"toolCd": "X", "authMode": "API_KEY", "budgetTokens": 1000}
+    assert budget_quota({**t, "budgetPeriod": "WEEKLY"}, 1, NOW) is None
+    assert budget_quota({**t, "budgetPeriod": ""}, 1, NOW) is None
+    assert budget_quota(t, 1, NOW) is None
+
+
+def test_codex_unreadable_file_returns_empty(tmp_path):
+    (tmp_path / "bad.jsonl").write_bytes(b"\xff\xfe\x00garbage")
+    assert collect_codex(tmp_path) == []
+
+
+def test_limit_event_invalid_rule_falls_back():
+    (row,) = quotas_from_event("GEMINI", RunEvent(limit_hit=True), "bogus", NOW)
+    assert row["status"] == "EXHAUSTED" and row["resetsAt"] == "2026-11-11T12:30:00"
 
 
 async def test_transition_notifies_once():
