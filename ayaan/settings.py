@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     ecc_token: str = ""
     api_token: str = ""
     jwt_secret_key: str = ""
+    jwt_allowed_subjects: str = ""  # comma list of JWT `sub` (email); empty rejects all JWTs
     workspace_roots: str = "/workspace"
     cli_executables: str = ""
     data_dir: str = "/data"
@@ -30,6 +31,10 @@ class Settings(BaseSettings):
     @property
     def workspace_root_paths(self) -> tuple[Path, ...]:
         return tuple(Path(v.strip()) for v in self.workspace_roots.split(",") if v.strip())
+
+    @property
+    def allowed_subjects(self) -> set[str]:
+        return {v.strip() for v in self.jwt_allowed_subjects.split(",") if v.strip()}
 
     @property
     def executable_map(self) -> dict[str, str]:
@@ -54,7 +59,7 @@ DEFAULT_EXE = {
     "claude": "claude",
     "codex": "codex",
     "gemini": "gemini",
-    "cursor": "cursor-agent",
+    "cursor": "agent",
     "git": "git",
 }
 

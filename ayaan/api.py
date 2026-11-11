@@ -1,5 +1,6 @@
 """Public API (/tsh/api/v1/ayaan/**) for ECC and d94-web, plus the app lifespan."""
 
+import asyncio
 import base64
 import binascii
 import logging
@@ -107,7 +108,7 @@ def create_app(
             if settings.eureka_enabled:
                 from py_eureka_client import eureka_client as eureka
 
-                eureka.init(
+                await eureka.init_async(  # sync init() fails inside a running event loop
                     eureka_server=settings.eureka_url,
                     app_name=settings.service_name,
                     instance_host=settings.eureka_instance_host,
@@ -124,7 +125,7 @@ def create_app(
             if start_background:
                 await scheduler.stop()
             if eureka:
-                eureka.stop()
+                await eureka.stop_async()
 
     def require_caller(
         x_ayaan_token: str | None = Header(None),
@@ -138,15 +139,18 @@ def create_app(
             return
         if authorization and authorization.startswith("Bearer ") and settings.jwt_secret_key:
             try:
-                jwt.decode(
+                claims = jwt.decode(
                     authorization.removeprefix("Bearer ").strip(),
                     base64.b64decode(settings.jwt_secret_key),
                     algorithms=["HS256"],
                     options={"require": ["exp"]},
                 )
-                return
             except (jwt.PyJWTError, binascii.Error, ValueError):
-                pass
+                raise ApiError(401, "unauthorized") from None
+            # d94 registration is open: a valid signature alone must not run code here
+            if claims.get("sub") not in settings.allowed_subjects:
+                raise ApiError(403, "forbidden")
+            return
         raise ApiError(401, "unauthorized")
 
     app = FastAPI(
@@ -174,12 +178,19 @@ def create_app(
 
     @app.exception_handler(httpx.HTTPStatusError)
     async def _query_error(_: Request, e: httpx.HTTPStatusError):
+        status = e.response.status_code
+        if status in (401, 403):  # our service token, not the caller: never echo it as 401
+            msg = "d94-query 인증 실패 (AYAAN_QUERY_SERVICE_TOKEN 확인)"
+            return JSONResponse({"success": False, "message": msg}, 502)
         try:
             message = e.response.json().get("message")
         except ValueError:
             message = None
-        status = e.response.status_code
         return JSONResponse({"success": False, "message": message or f"query {status}"}, status)
+
+    @app.exception_handler(httpx.TransportError)
+    async def _query_down(_: Request, e: httpx.TransportError):
+        return JSONResponse({"success": False, "message": "d94-query 연결 실패"}, 502)
 
     @app.get("/actuator/health")
     async def health():
@@ -264,7 +275,8 @@ def create_app(
     async def resume_task(task_id: str):
         now = to_query_ts(scheduler.clock())
         for expected in ("PAUSED", "FAILED"):
-            t = await query.transition(task_id, expected, "QUEUED", resumeAt=now)
+            fields = {"resumeAt": now} | ({"resumeCount": 0} if expected == "FAILED" else {})
+            t = await query.transition(task_id, expected, "QUEUED", **fields)
             if t:
                 scheduler.wake()
                 return ok(_task(t))
@@ -314,8 +326,10 @@ def create_app(
         if current is None:
             raise ApiError(404, f"unknown tool: {cd}")
         body.pop("toolCd", None)
-        _invalid(validate_tool({**current, **body}))  # PUT is partial in d94-query
-        return ok(await query.put_tool(cd, body))
+        merged = {**current, **body}
+        _invalid(validate_tool(merged))
+        merged.pop("toolCd", None)
+        return ok(await query.put_tool(cd, merged))  # d94-query PUT replaces every field
 
     @r.get("/workspaces")
     async def get_workspaces():
@@ -356,8 +370,14 @@ def create_app(
     @r.post("/setup/test-notify")
     async def test_notify():
         try:
-            sent = await ecc.notify(
-                "TEST", "ayaan 테스트 알림", "ayaan → ECC 알림 연결이 정상입니다."
+            sent = await asyncio.wait_for(
+                ecc.notify(
+                    "TEST",
+                    "ayaan 테스트 알림",
+                    "ayaan → ECC 알림 연결이 정상입니다.",
+                    retries=False,
+                ),
+                10,
             )
         except Exception:
             log.warning("test notify failed", exc_info=True)

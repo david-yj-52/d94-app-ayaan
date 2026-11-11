@@ -2,6 +2,7 @@ import base64
 import time
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import jwt
 import pytest
 from fakes import FakeEcc, InMemoryQuery
@@ -24,6 +25,7 @@ def env(tmp_path):
         _env_file=None,
         api_token="svc-token",
         jwt_secret_key=SECRET,
+        jwt_allowed_subjects="u, admin@d94",
         data_dir=str(tmp_path / "data"),
         workspace_roots=str(tmp_path),
         query_base_url="http://127.0.0.1:1/tsh/api/v1/internal/ayaan",
@@ -51,8 +53,8 @@ def env(tmp_path):
         yield client, q, ecc, s, settings, tmp_path
 
 
-def _jwt(exp_delta: int, key=b"k" * 32) -> dict:
-    tok = jwt.encode({"sub": "u", "exp": int(time.time()) + exp_delta}, key, algorithm="HS256")
+def _jwt(exp_delta: int, key=b"k" * 32, sub="u") -> dict:
+    tok = jwt.encode({"sub": sub, "exp": int(time.time()) + exp_delta}, key, algorithm="HS256")
     return {"Authorization": f"Bearer {tok}"}
 
 
@@ -169,10 +171,10 @@ def test_cancel_running_kills_process(env, monkeypatch):
 
 def test_resume_failed_requeues(env):
     c, q = env[0], env[1]
-    tid = q.add_task(status="FAILED")
+    tid = q.add_task(status="FAILED", resumeCount=10)
     r = c.post(f"{P}/tasks/{tid}/resume", headers=TOKEN)
     assert r.status_code == 200 and r.json()["data"]["status"] == "QUEUED"
-    assert q.task(tid)["resumeAt"]
+    assert q.task(tid)["resumeAt"] and q.task(tid)["resumeCount"] == 0
     assert c.post(f"{P}/tasks/{tid}/resume", headers=TOKEN).status_code == 409
 
 
@@ -230,6 +232,7 @@ def test_test_notify(env):
     c, ecc = env[0], env[2]
     r = c.post(f"{P}/setup/test-notify", headers=TOKEN)
     assert r.json() == {"success": True, "data": True} and ecc.events() == ["TEST"]
+    assert ecc.retries == [False]
 
 
 def test_setup_check_reports_missing_executable(env):
@@ -272,3 +275,80 @@ def test_docs_disabled(env):
     c = env[0]
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert c.get(path).status_code == 404
+
+
+def test_jwt_subject_allowlist(env):
+    c, settings = env[0], env[4]
+    assert c.get(f"{P}/tasks", headers=_jwt(60, sub="admin@d94")).status_code == 200
+    r = c.get(f"{P}/tasks", headers=_jwt(60, sub="stranger@x"))
+    assert r.status_code == 403 and r.json()["success"] is False
+    settings.jwt_allowed_subjects = ""
+    assert c.get(f"{P}/tasks", headers=_jwt(60, sub="u")).status_code == 403
+    assert c.get(f"{P}/tasks", headers=TOKEN).status_code == 200
+
+
+def test_query_auth_and_transport_errors_502(env):
+    c, q = env[0], env[1]
+    req = httpx.Request("GET", "http://q/tasks")
+
+    async def denied(*a, **k):
+        raise httpx.HTTPStatusError("x", request=req, response=httpx.Response(401, request=req))
+
+    q.list_tasks = denied
+    r = c.get(f"{P}/tasks", headers=TOKEN)
+    assert r.status_code == 502 and "AYAAN_QUERY_SERVICE_TOKEN" in r.json()["message"]
+
+    async def down(*a, **k):
+        raise httpx.ConnectError("refused", request=req)
+
+    q.list_tasks = down
+    r = c.get(f"{P}/tasks", headers=TOKEN)
+    assert r.status_code == 502 and r.json() == {"success": False, "message": "d94-query 연결 실패"}
+
+
+def test_put_tool_forwards_merged_body(env):
+    c, q = env[0], env[1]
+    q.tools["CLAUDE"]["model"] = "opus"
+    sent = []
+    orig = q.put_tool
+
+    async def spy(cd, body):
+        sent.append(body)
+        return await orig(cd, body)
+
+    q.put_tool = spy
+    r = c.put(f"{P}/tools/CLAUDE", json={"model": None}, headers=TOKEN)
+    assert r.status_code == 200
+    assert sent[0]["model"] is None and sent[0]["enabled"] == q.tools["CLAUDE"]["enabled"]
+    assert "toolCd" not in sent[0] and set(sent[0]) >= {"maxConcurrency", "authMode"}
+
+
+def test_lifespan_eureka_uses_async_api(tmp_path, monkeypatch):
+    from py_eureka_client import eureka_client
+
+    calls = []
+
+    async def init_async(**kw):
+        calls.append(("init", kw["app_name"]))
+
+    async def stop_async():
+        calls.append(("stop",))
+
+    def sync(*a, **k):
+        raise AssertionError("sync eureka call inside the event loop")
+
+    monkeypatch.setattr(eureka_client, "init_async", init_async)
+    monkeypatch.setattr(eureka_client, "stop_async", stop_async)
+    monkeypatch.setattr(eureka_client, "init", sync)
+    monkeypatch.setattr(eureka_client, "stop", sync)
+    settings = Settings(_env_file=None, eureka_enabled=True, data_dir=str(tmp_path))
+
+    class Sched:
+        async def boot(self): ...
+        async def start(self): ...
+        async def stop(self): ...
+
+    app = create_app(settings, InMemoryQuery.seeded(), FakeEcc(), Sched())
+    with TestClient(app):
+        pass
+    assert calls == [("init", "d94-app-ayaan"), ("stop",)]

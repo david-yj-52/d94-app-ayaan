@@ -257,9 +257,11 @@ class FakeEcc:
     def __init__(self, fail: bool = False):
         self.fail = fail
         self.sent: list[tuple] = []
+        self.retries: list[bool] = []
 
-    async def notify(self, event, title, body, buttons=None):
+    async def notify(self, event, title, body, buttons=None, retries=True):
         self.sent.append((event, title, body, buttons))
+        self.retries.append(retries)
         if self.fail:
             raise RuntimeError("ecc down")
         return True

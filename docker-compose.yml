@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      AYAAN_EUREKA_ENABLED: "true"
+      AYAAN_EUREKA_URL: http://eureka-cloud-eureka-1:8761/eureka/
+      AYAAN_EUREKA_INSTANCE_HOST: d94-app-ayaan
       AYAAN_EUREKA_INSTANCE_PORT: 8080
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8086}:8080"

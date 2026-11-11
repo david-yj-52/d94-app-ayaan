@@ -138,10 +138,15 @@ class EccClient:
         self._sleep = sleep
 
     async def notify(
-        self, event: str, title: str, body: str, buttons: list[dict] | None = None
+        self,
+        event: str,
+        title: str,
+        body: str,
+        buttons: list[dict] | None = None,
+        retries: bool = True,
     ) -> bool:
         payload = {"event": event, "title": title, "body": body, "buttons": buttons or []}
-        for delay in (*self.DELAYS, None):
+        for delay in (*(self.DELAYS if retries else ()), None):
             try:
                 resp = await self._http.post("/api/v1/notify", json=payload)
                 if resp.is_success:

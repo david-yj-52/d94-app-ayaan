@@ -16,14 +16,18 @@ RUN mkdir -p /opt/cursor && chown ayaan:ayaan /opt/cursor
 USER ayaan
 RUN HOME=/opt/cursor sh -c 'curl https://cursor.com/install -fsS | bash'
 USER root
-RUN ln -s "$(readlink -f /opt/cursor/.local/bin/agent)" /usr/local/bin/agent \
-    && ln -s "$(readlink -f /opt/cursor/.local/bin/cursor-agent)" /usr/local/bin/cursor-agent \
-    && agent --version
+# Docs name the binary `agent`; link both names, failing the build if either target is missing
+RUN for b in agent cursor-agent; do \
+        t="$(readlink -f /opt/cursor/.local/bin/$b)" && test -x "$t" && ln -s "$t" /usr/local/bin/$b || exit 1; \
+    done \
+    && agent --version && cursor-agent --version
 ENV HOME=/home/ayaan
 WORKDIR /app
 COPY pyproject.toml ./
 COPY ayaan ./ayaan
 RUN pip install --no-cache-dir .
-USER ayaan
+COPY docker/entrypoint.sh /usr/local/bin/ayaan-entrypoint
+# USER stays root only for the entrypoint: it fixes bind-mount ownership, then drops to uid 10001
 EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/ayaan-entrypoint"]
 CMD ["uvicorn", "ayaan.api:app", "--host", "0.0.0.0", "--port", "8080"]

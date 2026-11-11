@@ -36,6 +36,7 @@ KEY_ENV = {
     "GEMINI": "GEMINI_API_KEY",
     "CURSOR": "CURSOR_API_KEY",
 }
+FAKE_ENV = ("AYAAN_FAKE_SCENARIO", "AYAAN_FAKE_SCENARIO_FILE")
 _STATUS_KO = (("RUNNING", "실행"), ("QUEUED", "대기"), ("PAUSED", "중단"))
 
 
@@ -352,7 +353,14 @@ class Scheduler:
                 await self.sleep(delay)
 
     def _env(self, tool: dict) -> dict:
-        env = {k: v for k, v in os.environ.items() if k not in KEY_ENV.values()}
+        # ponytail: AYAAN_* (tokens, JWT key) never reach the CLI env; residual risk: the CLI runs
+        # as the same uid and can still read /proc/1/environ. Upgrade path: a separate uid for CLIs.
+        fake = FAKE_ENV if tool["toolCd"] == "FAKE" else ()  # non-secret FAKE scenario inputs
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in KEY_ENV.values() and (not k.startswith("AYAAN_") or k in fake)
+        }
         if tool.get("authMode") == "API_KEY" and tool["toolCd"] in KEY_ENV:
             env[KEY_ENV[tool["toolCd"]]] = os.environ[tool["apiKeyRef"]]  # never logged
         return env

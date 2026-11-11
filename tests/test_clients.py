@@ -34,6 +34,13 @@ async def test_notify_retries_then_false():
     assert calls[0].headers["X-ECC-Token"] == "et"
 
 
+async def test_notify_without_retries_tries_once():
+    calls = []
+    t = httpx.MockTransport(lambda r: calls.append(r) or httpx.Response(500))
+    assert await EccClient(S, transport=t).notify("e", "t", "b", retries=False) is False
+    assert len(calls) == 1
+
+
 async def test_delete_workspace_204_returns_none():
     t = httpx.MockTransport(lambda r: httpx.Response(204))
     assert await QueryClient(S, transport=t).delete_workspace("p") is None

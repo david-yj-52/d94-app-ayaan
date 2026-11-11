@@ -275,6 +275,7 @@ async def test_cancelled_outcome_only_finishes_run(settings):
 
 async def test_api_key_mode_env_and_budget(settings, monkeypatch):
     monkeypatch.setenv("AYAAN_ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("AYAAN_API_TOKEN", "secret")
     q, ecc, clock, runner, s = _setup([ok_result("s1")], settings)
     q.tools["CLAUDE"].update(
         authMode="API_KEY",
@@ -286,6 +287,7 @@ async def test_api_key_mode_env_and_budget(settings, monkeypatch):
     await s.tick()
     await s.drain()
     assert runner.calls[0].env["ANTHROPIC_API_KEY"] == "sk-test"
+    assert not [k for k in runner.calls[0].env if k.startswith("AYAAN_")]
     b = q.quotas[("CLAUDE", "BUDGET")]
     assert b["usedTokens"] == 110 and b["status"] == "EXHAUSTED"
 
@@ -438,3 +440,13 @@ async def test_unresolvable_executable_fails_task(settings):
     assert runner.calls == []
     assert q.task(tid)["status"] == "FAILED"
     assert "실행 파일을 찾을 수 없음" in q.task(tid)["failReason"]
+
+
+def test_cli_env_drops_ayaan_vars_but_fake_keeps_scenario(settings, monkeypatch):
+    monkeypatch.setenv("AYAAN_JWT_SECRET_KEY", "k")
+    monkeypatch.setenv("AYAAN_FAKE_SCENARIO_FILE", "/data/fake-scenario")
+    s = _setup([], settings)[-1]
+    assert not [k for k in s._env({"toolCd": "CLAUDE"}) if k.startswith("AYAAN_")]
+    fake = s._env({"toolCd": "FAKE"})
+    assert fake["AYAAN_FAKE_SCENARIO_FILE"] == "/data/fake-scenario"
+    assert "AYAAN_JWT_SECRET_KEY" not in fake
