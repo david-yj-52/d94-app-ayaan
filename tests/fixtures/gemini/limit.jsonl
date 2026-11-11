@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-11-10T11:00:00.000Z","session_id":"c7d1e4f0-2a9b-4c83-b6e5-1f0a8d3c5b92","model":"gemini-2.5-pro"}
+{"type":"message","timestamp":"2026-11-10T11:00:00.100Z","role":"user","content":"Append a line to README.md and print AYAAN_RESULT: done"}
+{"type":"error","timestamp":"2026-11-10T11:00:01.000Z","severity":"error","message":"You have exhausted your capacity on this model. Your quota will reset after 3h12m5s."}
+{"type":"result","timestamp":"2026-11-10T11:00:01.100Z","status":"error","error":{"type":"Error","message":"You have exhausted your capacity on this model. Your quota will reset after 3h12m5s."},"stats":{"total_tokens":0,"input_tokens":0,"output_tokens":0,"cached":0,"input":0,"duration_ms":1100,"tool_calls":0}}

@@ -1,0 +1,11 @@
+{
+  "session_id": "5f1c1a52-8f0e-4d6e-9d0a-3b1f6a7c9e21",
+  "input_tokens": 10,
+  "output_tokens": 120,
+  "cache_read_tokens": 1200,
+  "cache_write_tokens": 1200,
+  "cost_usd": 0.0123,
+  "limit_hit": false,
+  "resets_at": null,
+  "result_line": "done"
+}

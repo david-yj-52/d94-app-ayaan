@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/work/proj","session_id":"e9f0a1b2-3c4d-4e5f-9a6b-7c8d9e0f1a2b","model":"Claude 4.5 Sonnet","permissionMode":"default"}
+{"type":"result","subtype":"error","duration_ms":800,"duration_api_ms":0,"is_error":true,"result":"You've hit your usage limit. Upgrade your plan or wait until your limit resets.","session_id":"e9f0a1b2-3c4d-4e5f-9a6b-7c8d9e0f1a2b","request_id":"req-2"}

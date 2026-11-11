@@ -1,0 +1,11 @@
+{
+  "session_id": "e9f0a1b2-3c4d-4e5f-9a6b-7c8d9e0f1a2b",
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd": null,
+  "limit_hit": true,
+  "resets_at": null,
+  "result_line": null
+}

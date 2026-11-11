@@ -1,0 +1,11 @@
+{
+  "session_id": "0199a213-81c0-7800-8aa1-bbab2a035a53",
+  "input_tokens": 24763,
+  "output_tokens": 122,
+  "cache_read_tokens": 24448,
+  "cache_write_tokens": 0,
+  "cost_usd": null,
+  "limit_hit": false,
+  "resets_at": null,
+  "result_line": "done"
+}
