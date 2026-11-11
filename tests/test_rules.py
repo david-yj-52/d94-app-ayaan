@@ -170,3 +170,20 @@ def test_workspace_prompt_template_placeholders(tmp_path):
 
 def test_render_prompt_keeps_braces_in_content():
     assert render_prompt("{issueKey}:{content}", "CIRA-1", "t", "a {b} c") == "CIRA-1:a {b} c"
+
+
+def test_tool_blank_reset_rule_is_unset_and_budget_period_enum():
+    base = {"authMode": "ACCOUNT"}
+    assert validate_tool({**base, "fallbackResetRule": ""}) == {}
+    assert set(validate_tool({**base, "fallbackResetRule": 5})) == {"fallbackResetRule"}
+    for ok in ("", None, "DAILY", "MONTHLY"):
+        assert validate_tool({**base, "budgetPeriod": ok}) == {}
+    assert set(validate_tool({**base, "budgetPeriod": "WEEKLY"})) == {"budgetPeriod"}
+
+
+def test_workspace_non_string_template_and_default_tool(tmp_path):
+    (tmp_path / "p").mkdir()
+    body = {"workspacePath": str(tmp_path / "p"), "promptTemplate": 5}
+    assert set(validate_workspace(body, (tmp_path,))) == {"promptTemplate"}
+    body = {"workspacePath": str(tmp_path / "p"), "defaultTool": "NOPE"}
+    assert set(validate_workspace(body, (tmp_path,))) == {"defaultTool"}

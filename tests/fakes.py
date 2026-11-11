@@ -62,6 +62,8 @@ class InMemoryQuery:
         self.quotas: dict[tuple[str, str], dict] = {}
         self.tasks: dict[str, dict] = {}
         self.runs: dict[str, dict] = {}
+        self.workspaces: dict[str, dict] = {}
+        self.issues: dict[str, dict] = {}
         self.fail_finish = 0  # number of finish_run calls that raise
 
     @classmethod
@@ -133,7 +135,14 @@ class InMemoryQuery:
         return dict(self.tools[cd])
 
     async def get_workspaces(self):
-        return []
+        return [dict(w) for w in self.workspaces.values()]
+
+    async def put_workspace(self, key, body):
+        self.workspaces[key] = {**self.workspaces.get(key, {}), **body, "projectKey": key}
+        return dict(self.workspaces[key])
+
+    async def delete_workspace(self, key):
+        self.workspaces.pop(key, None)
 
     async def get_quotas(self):
         return [dict(r) for r in self.quotas.values()]
@@ -143,6 +152,10 @@ class InMemoryQuery:
         return self.quotas[(tool, window)]
 
     async def create_task(self, body):
+        key = body.get("issueKey")
+        for t in self.tasks.values():
+            if key and t["issueKey"] == key and t["status"] in ("QUEUED", "RUNNING", "PAUSED"):
+                return 409, dict(t)
         tid = self.add_task(**body)
         return 201, dict(self.tasks[tid])
 
@@ -237,7 +250,7 @@ class InMemoryQuery:
         return dict(self.runs[run_id])
 
     async def issue_by_key(self, key):
-        return None
+        return self.issues.get(key)
 
 
 class FakeEcc:

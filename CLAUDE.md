@@ -7,6 +7,14 @@ Spec: /Users/davidkim/Documents/Brain/projects/david94/feature/app_ayaan/phase1/
 |---|---|
 | `ayaan/settings.py` | `Settings` (env prefix `AYAAN_`) |
 | `ayaan/clients.py` | `QueryClient` (d94-query internal API), `EccClient` (notify) |
-| `ayaan/api.py` | FastAPI app, `/actuator/health`, Eureka lifespan |
+| `ayaan/rules.py` | Reset rules, policy resolution, config/tool/workspace validation, prompt rendering |
+| `ayaan/adapters.py` | Per-CLI argv and output parsing, `TESTED_VERSIONS` |
+| `ayaan/runner.py` | CLI subprocess run, timeout, `kill_task`, result spool |
+| `ayaan/quota.py` | Quota collectors (`collect_all`), budget rows |
+| `ayaan/scheduler.py` | `Scheduler`: claim, run, lease, pause/resume, notifications, reports |
+| `ayaan/api.py` | `create_app()` factory: public API `/tsh/api/v1/ayaan/**` (auth `X-AYAAN-Token` or HS256 JWT), `/actuator/health`, lifespan (Eureka + scheduler) |
+| `ayaan/setup_check.py` | `GET /setup/check` steps 1..6 (presence/status only, never env values) |
+| `ayaan/fake_cli.py` | `FAKE` tool CLI for `AYAAN_PROFILE=test` |
+| `tests/fakes.py` | `InMemoryQuery`, `FakeEcc`, `FakeClock`, `fake_runner` |
 
 Dev: `python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'`, `.venv/bin/pytest -q`, `.venv/bin/ruff check .`

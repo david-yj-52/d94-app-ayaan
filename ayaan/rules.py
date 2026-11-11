@@ -124,9 +124,9 @@ def validate_tool(body: dict) -> dict[str, str]:
     if mc is not None and (isinstance(mc, bool) or not isinstance(mc, int) or not 1 <= mc <= 4):
         errs["maxConcurrency"] = "must be an integer 1~4"
     rule = body.get("fallbackResetRule")
-    if rule is not None:
+    if rule not in (None, ""):  # blank = unset; the scheduler falls back to its default
         try:
-            next_reset(rule, datetime.now(UTC))
+            next_reset(str(rule), datetime.now(UTC))
         except ValueError:
             errs["fallbackResetRule"] = "invalid reset rule"
     ref = body.get("apiKeyRef")
@@ -135,6 +135,8 @@ def validate_tool(body: dict) -> dict[str, str]:
     bt = body.get("budgetTokens")
     if bt is not None and (isinstance(bt, bool) or not isinstance(bt, int) or bt < 1):
         errs["budgetTokens"] = "must be an integer >= 1"
+    if body.get("budgetPeriod") not in (None, "", "DAILY", "MONTHLY"):
+        errs["budgetPeriod"] = "must be DAILY or MONTHLY"
     return errs
 
 
@@ -150,8 +152,12 @@ def validate_workspace(body: dict, roots: tuple[Path, ...]) -> dict[str, str]:
         elif not p.is_dir():
             errs["workspacePath"] = "directory does not exist"
     tpl = body.get("promptTemplate")
-    if tpl and set(re.findall(r"\{[^{}]*\}", tpl)) - {"{issueKey}", "{title}", "{content}"}:
+    if tpl is not None and not isinstance(tpl, str):
+        errs["promptTemplate"] = "must be a string"
+    elif tpl and set(re.findall(r"\{[^{}]*\}", tpl)) - {"{issueKey}", "{title}", "{content}"}:
         errs["promptTemplate"] = "only {issueKey}, {title}, {content} placeholders allowed"
+    if body.get("defaultTool") not in (None, *TOOLS):
+        errs["defaultTool"] = f"must be one of {sorted(TOOLS)}"
     return errs
 
 
