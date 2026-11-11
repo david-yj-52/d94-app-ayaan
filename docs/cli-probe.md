@@ -53,3 +53,7 @@
 - Codex: `input_tokens` 에 `cached_input_tokens` 가 **포함**됨 (cache_read = cached_input_tokens).
 - Gemini: `stats.input_tokens` 에 `cached` 가 **포함**됨 (cache_read = cached).
 - Cursor: 토큰 정보 없음 (0).
+
+## 결정: Cursor 프롬프트
+
+Cursor 는 문서대로 프롬프트를 마지막 위치 인자로 넘긴다 (stdin 미사용, 어댑터 `prompt_in_argv = True`). 셸을 쓰지 않아 안전하다. 한계: Linux 인자 하나 128KB.

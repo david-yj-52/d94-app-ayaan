@@ -38,6 +38,7 @@ class RunEvent:
     result_line: str | None = None
     session_missing: bool = False
     rate_limits: list[dict] = field(default_factory=list)
+    json_seen: bool = False  # parse saw at least one JSON object
 
 
 def _scan(lines):
@@ -74,6 +75,7 @@ def _finish(tool, ev, texts, text_for_result):
 
 
 class Claude:
+    prompt_in_argv = False
     tool = "CLAUDE"
 
     def _base(self, model):
@@ -114,10 +116,12 @@ class Claude:
                 ev.cost_usd = o.get("total_cost_usd")
                 if o.get("is_error"):
                     errs.append(result)
+        ev.json_seen = bool(objs)
         return _finish("CLAUDE", ev, errs, result)
 
 
 class Codex:
+    prompt_in_argv = False
     tool = "CODEX"
     _FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 
@@ -151,10 +155,12 @@ class Codex:
             elif t == "turn.failed":
                 errs.append((o.get("error") or {}).get("message") or "")
         # ponytail: codex limit text has a tz-less date, so resets_at stays None
+        ev.json_seen = bool(objs)
         return _finish("CODEX", ev, errs, last)
 
 
 class Gemini:
+    prompt_in_argv = False
     tool = "GEMINI"
 
     def _base(self, model):
@@ -186,10 +192,14 @@ class Gemini:
                 ev.cache_read_tokens = s.get("cached", 0)
                 if o.get("error"):
                     errs.append(o["error"].get("message") or "")
+        ev.json_seen = bool(objs)
         return _finish("GEMINI", ev, errs, "".join(msgs))
 
 
 class Cursor:
+    # ponytail: prompt is the last argv item (no shell); Linux caps one arg at 128KB,
+    # upgrade path: stdin if Cursor ever documents it
+    prompt_in_argv = True
     tool = "CURSOR"
 
     def _base(self, model):
@@ -211,10 +221,12 @@ class Cursor:
                 result = o.get("result") or ""
                 if o.get("is_error"):
                     errs.append(result)
+        ev.json_seen = bool(objs)
         return _finish("CURSOR", ev, errs, result)
 
 
 class Fake:
+    prompt_in_argv = False
     tool = "FAKE"
 
     def new_argv(self, model):

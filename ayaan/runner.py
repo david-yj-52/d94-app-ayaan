@@ -12,6 +12,8 @@ from ayaan.adapters import ADAPTERS, RunEvent
 
 KILL_GRACE_S = 10  # injectable for tests
 RUNNING: dict[str, asyncio.subprocess.Process] = {}
+CANCELLED: set[str] = set()
+_BG: set[asyncio.Task] = set()
 
 
 @dataclass
@@ -27,18 +29,32 @@ def _killpg(proc, sig):
         os.killpg(proc.pid, sig)
 
 
+async def _terminate(proc):
+    _killpg(proc, signal.SIGTERM)
+    try:
+        await asyncio.wait_for(proc.wait(), KILL_GRACE_S)
+    except TimeoutError:
+        pass
+    _killpg(proc, signal.SIGKILL)  # also reaps stragglers left in the group
+    await proc.wait()
+
+
 def kill_task(task_id: str) -> bool:
     proc = RUNNING.get(task_id)
     if proc is None:
         return False
-    _killpg(proc, signal.SIGTERM)
+    CANCELLED.add(task_id)
+    t = asyncio.get_running_loop().create_task(_terminate(proc))
+    _BG.add(t)
+    t.add_done_callback(_BG.discard)
     return True
 
 
 async def _feed(proc, prompt: str):
     with contextlib.suppress(BrokenPipeError, ConnectionResetError):
-        proc.stdin.write(prompt.encode())
-        await proc.stdin.drain()
+        if prompt:
+            proc.stdin.write(prompt.encode())
+            await proc.stdin.drain()
         proc.stdin.close()
 
 
@@ -55,9 +71,11 @@ async def run_cli(
     task_id: str | None = None,
 ) -> RunResult:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    in_argv = ADAPTERS[tool].prompt_in_argv
     proc = await asyncio.create_subprocess_exec(
         executable,
         *argv_tail,
+        *([prompt] if in_argv else []),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -78,33 +96,37 @@ async def run_cli(
                 log.write(line + "\n")
                 log.flush()
 
-    feeder = asyncio.create_task(_feed(proc, prompt))
-    timed_out = False
-    try:
-        await asyncio.wait_for(read(), timeout_s)
+    feeder = asyncio.create_task(_feed(proc, "" if in_argv else prompt))
+    timed_out = cancelled = False
+
+    async def pump():
+        await read()
         await proc.wait()
+
+    try:
+        await asyncio.wait_for(pump(), timeout_s)
     except TimeoutError:
         timed_out = True
-        _killpg(proc, signal.SIGTERM)
-        try:
-            await asyncio.wait_for(proc.wait(), KILL_GRACE_S)
-        except TimeoutError:
-            pass
-        _killpg(proc, signal.SIGKILL)  # also reaps stragglers left in the group
-        await proc.wait()
+        await _terminate(proc)
     finally:
         feeder.cancel()
         if task_id:
             RUNNING.pop(task_id, None)
+            cancelled = task_id in CANCELLED
+            CANCELLED.discard(task_id)
 
     tail = "\n".join(lines)[-2000:]
     try:
         event = ADAPTERS[tool].parse(lines)
     except Exception:
-        outcome = "TIMEOUT" if timed_out else "PARSE_ERROR"
+        outcome = "CANCELLED" if cancelled else "TIMEOUT" if timed_out else "PARSE_ERROR"
         return RunResult(outcome, RunEvent(), proc.returncode, tail)
-    if timed_out:
+    if cancelled:
+        outcome = "CANCELLED"
+    elif timed_out:
         outcome = "TIMEOUT"
+    elif proc.returncode == 0 and not event.json_seen and not event.limit_hit:
+        outcome = "PARSE_ERROR"
     elif event.limit_hit:
         outcome = "LIMIT_HIT"
     elif proc.returncode == 0:

@@ -49,3 +49,7 @@ def test_argv_and_versions():
 def test_session_missing_detected():
     ev = ADAPTERS["CLAUDE"].parse(["No conversation found with session ID: abc"])
     assert ev.session_missing and not ev.limit_hit
+
+
+def test_prompt_in_argv_only_for_cursor():
+    assert {t for t, a in ADAPTERS.items() if a.prompt_in_argv} == {"CURSOR"}

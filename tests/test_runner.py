@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -65,7 +66,7 @@ async def test_timeout_kills_process_group(tmp_path, monkeypatch):
     with pytest.raises(ProcessLookupError):
         for _ in range(20):  # child may linger as zombie briefly
             os.kill(pid, 0)
-            await __import__("asyncio").sleep(0.1)
+            await asyncio.sleep(0.1)
         os.kill(pid, 0)
         raise AssertionError("child alive")
 
@@ -76,12 +77,10 @@ async def test_long_prompt_goes_through_stdin(tmp_path):
         ["-c", "import sys; print(len(sys.stdin.read()))"],
         prompt="x" * 200_000,
     )
-    assert r.tail.strip() == "200000" and r.outcome == "COMPLETED"
+    assert r.tail.strip() == "200000"
 
 
 async def test_kill_task(tmp_path):
-    import asyncio
-
     t = asyncio.create_task(
         _run(tmp_path, ["-c", "import time; time.sleep(60)"], task_id="t1", timeout_s=30)
     )
@@ -91,7 +90,8 @@ async def test_kill_task(tmp_path):
         await asyncio.sleep(0.05)
     assert runner.kill_task("t1") is True
     r = await asyncio.wait_for(t, 5)
-    assert r.outcome == "FAILED" and "t1" not in runner.RUNNING
+    assert r.outcome == "CANCELLED" and "t1" not in runner.RUNNING
+    assert "t1" not in runner.CANCELLED
     assert runner.kill_task("t1") is False
 
 
@@ -103,3 +103,15 @@ def test_spool_roundtrip(tmp_path):
     assert json.loads(p.read_text()) == {"a": 1}
     p.unlink()
     assert pending_spool(tmp_path) == []
+
+
+async def test_exit0_with_unrecognized_output_is_parse_error(tmp_path):
+    r = await _run(tmp_path, ["-c", "print('hello')"])
+    assert r.outcome == "PARSE_ERROR" and r.exit_code == 0
+
+
+async def test_cursor_prompt_is_last_argv_item(tmp_path):
+    r = await _run(
+        tmp_path, ["-c", "import sys; print(sys.argv[-1])"], prompt="do the thing", tool="CURSOR"
+    )
+    assert r.tail.strip() == "do the thing"
