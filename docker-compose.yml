@@ -1,0 +1,27 @@
+services:
+  ayaan:
+    image: ghcr.io/david-yj-52/d94-app-ayaan:${IMAGE_TAG:-latest}
+    container_name: d94-app-ayaan
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AYAAN_EUREKA_INSTANCE_PORT: 8080
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8086}:8080"
+    volumes:
+      - "${WORKSPACE_HOST_PATH:-./workspace}:/workspace"
+      - "${CLI_AUTH_HOST_PATH:-./cli-auth}:/home/ayaan"
+      - "${DATA_HOST_PATH:-./data}:/data"
+    networks:
+      - cloud
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/actuator/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  cloud:
+    name: ${CLOUD_NETWORK_NAME:-befw-cloud-network}
+    external: true
