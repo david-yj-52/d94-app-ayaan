@@ -45,4 +45,11 @@
 
 ## fixture 목록 (전부 합성)
 
-`tests/fixtures/{claude,codex,gemini,cursor}/{ok,limit,resume}.jsonl` + `.expected.json`. ok/resume 의 최종 텍스트에 `AYAAN_RESULT: done`. resume 은 ok 와 같은 session id 를 쓴다. limit 의 `resets_at` 은 Claude만 값이 있고(`2026-11-11T16:00:00Z`), Codex/Gemini/Cursor 는 문구에 절대 시각/타임존이 없어 `null` (어댑터가 now+상대시간 또는 rate_limits 로 계산). Cursor 의 토큰은 0, cost null.
+`tests/fixtures/{claude,codex,gemini,cursor}/{ok,limit,resume}.jsonl` + `.expected.json`. ok/resume 의 최종 텍스트에 `AYAAN_RESULT: done`. resume 은 ok 와 같은 session id 를 쓴다. limit 의 `resets_at` 은 Claude만 값이 있고(`2026-11-11T16:00:00Z`), Codex 는 문구의 날짜에 타임존이 없고 Gemini/Cursor 는 상대시간/시각 없음이라 `null` (어댑터는 `resets_at` 을 추정하지 않고 None 유지). Cursor 의 토큰은 0, cost null.
+
+## 토큰 규약
+
+- Claude: `input_tokens` 는 캐시를 **제외** (`cache_read_input_tokens`/`cache_creation_input_tokens` 별도).
+- Codex: `input_tokens` 에 `cached_input_tokens` 가 **포함**됨 (cache_read = cached_input_tokens).
+- Gemini: `stats.input_tokens` 에 `cached` 가 **포함**됨 (cache_read = cached).
+- Cursor: 토큰 정보 없음 (0).

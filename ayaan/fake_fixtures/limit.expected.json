@@ -1,0 +1,11 @@
+{
+  "session_id": "9b2e7c10-1d4a-4f6b-8a55-0c2e9d7f1a33",
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "cost_usd": 0.0,
+  "limit_hit": true,
+  "resets_at": "2026-11-11T16:00:00Z",
+  "result_line": null
+}
