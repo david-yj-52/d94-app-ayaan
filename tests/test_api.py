@@ -360,3 +360,13 @@ async def test_setup_probe_env_drops_ayaan_vars(monkeypatch):
     monkeypatch.setenv("AYAAN_JWT_SECRET_KEY", "k")
     code, out = await setup_check._run("/usr/bin/env")
     assert code == 0 and "GIT_TERMINAL_PROMPT=0" in out and "AYAAN_" not in out
+
+
+def test_gemini_login_detected_by_either_credential_file(tmp_path, monkeypatch):
+    from ayaan import setup_check
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "gemini-credentials.json").write_text("{}")
+    files = setup_check.LOGIN_FILES["GEMINI"]
+    assert any((tmp_path / f).is_file() for f in files)

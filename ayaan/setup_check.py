@@ -13,11 +13,12 @@ from ayaan.settings import Settings, child_env, resolve_exe
 
 TIMEOUT_S = 10
 # credential files written by each CLI's login, relative to HOME
+# ponytail: any one file counts as logged in; gemini-cli writes either name depending on version
 LOGIN_FILES = {
-    "CLAUDE": ".claude/.credentials.json",
-    "CODEX": ".codex/auth.json",
-    "GEMINI": ".gemini/oauth_creds.json",
-    "CURSOR": ".cursor/cli-config.json",
+    "CLAUDE": (".claude/.credentials.json",),
+    "CODEX": (".codex/auth.json",),
+    "GEMINI": (".gemini/oauth_creds.json", ".gemini/gemini-credentials.json"),
+    "CURSOR": (".cursor/cli-config.json",),
 }
 
 
@@ -100,7 +101,7 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
     step1 = list(await asyncio.gather(*(_version(cd, exe) for cd, exe in exes.items())))
     for t in cli:
         if t.get("authMode") != "API_KEY":
-            found = (Path.home() / LOGIN_FILES[t["toolCd"]]).is_file()
+            found = any((Path.home() / f).is_file() for f in LOGIN_FILES[t["toolCd"]])
             step1.append(
                 _item(f"{t['toolCd']} login", found, "logged in" if found else "not logged in")
             )
