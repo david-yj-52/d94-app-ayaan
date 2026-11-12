@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ayaan import plugins
 from ayaan.clients import EccClient, QueryClient, to_query_ts
 from ayaan.quota import collect_all
 from ayaan.rules import (
@@ -119,6 +120,7 @@ def create_app(
             except Exception:  # query down at boot: every tick recovers again
                 log.exception("scheduler boot failed")
             await scheduler.start()
+            app.state.plugin_sync = asyncio.create_task(_boot_sync())  # never blocks boot
         try:
             yield
         finally:
@@ -362,6 +364,27 @@ def create_app(
                 "defaultTool": ws.get("defaultTool"),
             }
         )
+
+    async def _sync_plugins() -> list[dict]:
+        spec = (await query.get_config() or {}).get("CLAUDE_PLUGINS", plugins.DEFAULT)
+        try:
+            return await plugins.sync(spec, settings)
+        except ValueError as e:
+            raise ApiError(400, message=str(e)) from e
+
+    async def _boot_sync() -> None:
+        try:
+            log.info("plugin sync: %s", await _sync_plugins())
+        except Exception:
+            log.exception("plugin sync failed")
+
+    @r.post("/plugins/sync")
+    async def sync_plugins():
+        return ok(await _sync_plugins())
+
+    @r.get("/plugins")
+    async def list_plugins():
+        return ok({"output": await plugins.installed(settings)})
 
     @r.get("/setup/check")
     async def setup_check():

@@ -25,6 +25,7 @@ _KNOWN = set(_INT_RANGES) | {
     "REPORT_CRON",
     "NOTIFY_EVENTS",
     "DEFAULT_PROJECT_KEY",
+    "CLAUDE_PLUGINS",
 }
 
 
@@ -111,6 +112,13 @@ def validate_config(values: dict[str, str]) -> dict[str, str]:
         elif k == "REPORT_CRON":
             if v.strip() and not (len(v.split()) == 5 and croniter.is_valid(v)):
                 errs[k] = "must be empty or a valid 5-field cron"
+        elif k == "CLAUDE_PLUGINS":
+            from ayaan.plugins import parse
+
+            try:
+                parse(v)
+            except ValueError as e:
+                errs[k] = str(e)
         # DEFAULT_PROJECT_KEY: any string
     return errs
 

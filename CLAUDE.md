@@ -13,6 +13,7 @@ Spec: /Users/davidkim/Documents/Brain/projects/david94/feature/app_ayaan/phase1/
 | `ayaan/quota.py` | Quota collectors (`collect_all`), budget rows |
 | `ayaan/scheduler.py` | `Scheduler`: claim, run, lease, pause/resume, notifications, reports |
 | `ayaan/api.py` | `create_app()` factory: public API `/tsh/api/v1/ayaan/**` (auth `X-AYAAN-Token` or HS256 JWT), `/actuator/health`, lifespan (Eureka + scheduler) |
+| `ayaan/plugins.py` | Claude plugin install from config `CLAUDE_PLUGINS` (`POST /plugins/sync`, `GET /plugins`, boot sync) |
 | `ayaan/setup_check.py` | `GET /setup/check` steps 1..6 (presence/status only, never env values) |
 | `ayaan/fake_cli.py` | `FAKE` tool CLI for `AYAAN_PROFILE=test` |
 | `tests/fakes.py` | `InMemoryQuery`, `FakeEcc`, `FakeClock`, `fake_runner` |
