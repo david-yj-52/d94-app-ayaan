@@ -1,6 +1,9 @@
-"""Setup check (spec appendix B, steps 1..6). Reports presence and status only, never env values."""
+"""Setup check (spec appendix B, steps 1..6; step 7 = TSTA-1 session retention).
+
+Reports presence and status only, never env values."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -20,6 +23,29 @@ LOGIN_FILES = {
     "GEMINI": (".gemini/oauth_creds.json", ".gemini/gemini-credentials.json"),
     "CURSOR": (".cursor/cli-config.json",),
 }
+
+
+# A WAITING task resumes its CLI session whenever the human answers, so sessions must outlive
+# the CLI default (~30 days). Checked and advised only, never written (spec D13).
+RETENTION = {
+    "CLAUDE": (".claude/settings.json", ("cleanupPeriodDays",), 365),
+    "GEMINI": (".gemini/settings.json", ("general", "sessionRetention", "maxAge"), 365),
+}
+
+
+def _retention(cd: str) -> dict:
+    rel, keys, days = RETENTION[cd]
+    try:
+        v = json.loads((Path.home() / rel).read_text())
+        for k in keys:
+            v = v[k]
+        n = int(str(v).rstrip("d"))
+    except (OSError, ValueError, KeyError, TypeError):
+        n = None
+    want = f"~/{rel} {'.'.join(keys)} >= {days}{'d' if cd == 'GEMINI' else ''}"
+    return _item(
+        f"{cd} session retention", n is not None and n >= days, f"{n or '미설정'} ({want})"
+    )
 
 
 def _item(name: str, ok: bool, detail: str) -> dict:
@@ -154,4 +180,5 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
             ],
         ),
         _step(6, step6),
+        _step(7, [_retention(cd) for cd in sorted(enabled_cds & RETENTION.keys())], optional=True),
     ]

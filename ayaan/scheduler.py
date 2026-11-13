@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import secrets
 import socket
 import sys
 from collections import defaultdict
@@ -14,10 +15,20 @@ from zoneinfo import ZoneInfo
 import httpx
 from croniter import croniter
 
+from ayaan import plugins
 from ayaan.adapters import ADAPTERS, RunEvent
 from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
-from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at
+from ayaan.rules import (
+    DEV_TEMPLATE,
+    NOTIFY,
+    PROTOCOL,
+    effective_policy,
+    plan_doc_path,
+    render_prompt,
+    resolve_resume_at,
+    resolve_skill,
+)
 from ayaan.runner import RunResult, kill_task, pending_spool, run_cli, write_spool
 from ayaan.settings import child_env, resolve_exe
 
@@ -37,7 +48,9 @@ KEY_ENV = {
     "CURSOR": "CURSOR_API_KEY",
 }
 FAKE_ENV = ("AYAAN_FAKE_SCENARIO", "AYAAN_FAKE_SCENARIO_FILE")
-_STATUS_KO = (("RUNNING", "실행"), ("QUEUED", "대기"), ("PAUSED", "중단"))
+_STATUS_KO = (("RUNNING", "실행"), ("QUEUED", "대기"), ("PAUSED", "중단"), ("WAITING", "응답 대기"))
+PLUGIN_CACHE_S = 600
+KIND_KO = {"QUESTION": "질문", "PERMISSION": "권한 요청", "START": "개발 시작"}
 
 
 # ── message formatting ─────────────────────────────────────────────────────
@@ -89,7 +102,32 @@ def format_failed(task: dict, tail: str) -> str:
     return f"{_label(task)}\nTool: {task.get('toolCd')}\n사유: {''.join(reason)}\n로그:\n{last}"
 
 
-def format_report(quotas: list[dict], counts: dict, paused: list[dict]) -> str:
+def format_request(task: dict, req: dict) -> str:
+    lines = [_label(task), f"[{KIND_KO.get(req.get('kind'), req.get('kind'))}]"]
+    lines.append(req.get("question") or "-")
+    for i, opt in enumerate(req.get("options") or []):
+        lines.append(f"{i + 1}. {opt}" + (" (추천)" if req.get("recommend") == i else ""))
+    if req.get("context"):
+        lines.append(f"배경: {req['context']}")
+    if req.get("kind") == "QUESTION":
+        lines.append("이 메시지에 답장하면 자유 답변으로 전달됩니다.")
+    lines.append(f"요청 ID: {req['id']}")
+    return "\n".join(lines)
+
+
+def request_buttons(task_id: str, req: dict) -> list[dict]:
+    buttons = [
+        {"label": opt, "action": "answer", "requestId": req["id"], "choice": i}
+        for i, opt in enumerate(req.get("options") or [])
+    ]
+    if req.get("kind") != "START":  # START already offers 취소 as an answer
+        buttons.append({"label": "작업 취소", "action": "cancel", "taskId": task_id})
+    return buttons
+
+
+def format_report(
+    quotas: list[dict], counts: dict, paused: list[dict], waiting: list[tuple] = ()
+) -> str:
     lines = ["[한도]"]
     for q in sorted(quotas, key=lambda q: (q["toolCd"], q["windowCd"])):
         pct = "?" if q.get("usedPct") is None else f"{float(q['usedPct']):g}%"
@@ -101,6 +139,8 @@ def format_report(quotas: list[dict], counts: dict, paused: list[dict]) -> str:
     lines.append("[작업] " + ", ".join(f"{ko} {counts.get(st, 0)}" for st, ko in _STATUS_KO))
     for t in paused:
         lines.append(f"- {_label(t)} ({t.get('toolCd')}) 재개 예정 {_kst(t.get('resumeAt'))}")
+    for t, req_id in waiting:
+        lines.append(f"- {_label(t)} ({t.get('toolCd')}) 응답 대기, 요청 ID {req_id or '-'}")
     return "\n".join(lines)
 
 
@@ -141,6 +181,10 @@ class Scheduler:
         self._active: set[str] = set()  # task ids inside _execute in this process
         self._lost: set[str] = set()  # task ids whose lease is no longer ours
         self.sleep = asyncio.sleep  # settle backoff; injectable for tests
+        self.hook_tokens: dict[str, tuple[str, str]] = {}  # per-run token -> (taskId, runId)
+        self._plugin_cache: tuple[datetime, str] | None = None
+        self.plugin_list = lambda: plugins.installed(settings)  # injectable for tests
+        self.plugin_sync = lambda spec: plugins.sync(spec, settings)
 
     # ── notifications ──
     async def _config(self) -> dict:
@@ -225,7 +269,9 @@ class Scheduler:
         for t in tasks:
             counts[t["status"]] += 1
         paused = [t for t in tasks if t["status"] == "PAUSED"]
-        body = format_report(await self.query.get_quotas() or [], counts, paused)
+        open_req = {r["taskId"]: r["id"] for r in await self.query.list_requests("OPEN") or []}
+        waiting = [(t, open_req.get(t["id"])) for t in tasks if t["status"] == "WAITING"]
+        body = format_report(await self.query.get_quotas() or [], counts, paused, waiting)
         try:  # not an immediate event: NOTIFY_EVENTS does not filter it
             await self.ecc.notify("REPORT", "ayaan 정기 리포트", body)
         except Exception:
@@ -307,6 +353,11 @@ class Scheduler:
         lease = asyncio.create_task(self._keep_lease(tid))  # held until settle is done
         try:
             cfg = await self._config()
+            reqs = (await self.query.get_task(tid) or {}).get("requests") or []
+            if any(r["status"] == "OPEN" for r in reqs):
+                # a limit pause came back while a human request is still open (spec 4.3-2)
+                await self.query.transition(tid, "RUNNING", "WAITING")
+                return
             session = task.get("cliSessionId")
             if session:
                 n, mx = task.get("resumeCount") or 0, _int(cfg, "MAX_RESUME_COUNT", 10)
@@ -315,12 +366,16 @@ class Scheduler:
                     f"재개: {_label(task)}",
                     f"{_label(task)}\nTool: {cd}\n재개 {n}/{mx}",
                 )
-            res, rows = await self._run_once(task, tool, cfg, session)
+            elif not await self._skill_ok(task, tool, cfg):
+                return
+            res, rows, run_id = await self._run_once(task, tool, cfg, session, reqs)
             retry = res.event.session_missing and res.outcome not in ("COMPLETED", "CANCELLED")
             if session and retry:
                 session = None  # the old session is gone: one fresh run on the same tool
-                res, rows = await self._run_once(task, tool, cfg, None)
-            await self._settle_retrying(task, res, rows, res.event.session_id or session)
+                if not await self._skill_ok(task, tool, cfg):
+                    return
+                res, rows, run_id = await self._run_once(task, tool, cfg, None, reqs)
+            await self._settle_retrying(task, res, rows, res.event.session_id or session, run_id)
         except Exception as e:
             log.exception("execute %s failed", tid)
             with contextlib.suppress(Exception):
@@ -337,12 +392,12 @@ class Scheduler:
             self._active.discard(tid)
             self._lost.discard(tid)
 
-    async def _settle_retrying(self, task, res, rows, sid) -> None:
+    async def _settle_retrying(self, task, res, rows, sid, run_id=None) -> None:
         """Query transport errors retry with backoff while the lease is still ours."""
         attempt = 0
         while True:
             try:
-                return await self._settle(task, res, rows, sid)
+                return await self._settle(task, res, rows, sid, run_id)
             except httpx.HTTPError:
                 if task["id"] in self._lost:
                     log.warning("settle of %s abandoned: lease lost", task["id"])
@@ -379,20 +434,202 @@ class Scheduler:
                 kill_task(tid)
                 return
 
-    async def _run_once(self, task: dict, tool: dict, cfg: dict, session: str | None):
+    # ── skills, human requests ──
+    async def _skill_ok(self, task: dict, tool: dict, cfg: dict) -> bool:
+        """A Claude skill whose plugin is not installed fails the task instead of silently
+        running without it (D6). One CLAUDE_PLUGINS sync is tried first."""
+        skill = resolve_skill(task, tool, await self.query.get_skills() or [])
+        task["_skill"] = skill
+        ref = skill and task["toolCd"] == "CLAUDE" and skill.get("pluginRef")
+        if not ref or await self._plugin_ready(ref, cfg):
+            return True
+        await self._fail(task, f"SKILL_PLUGIN_MISSING: {ref}", "", None, self.clock())
+        return False
+
+    async def _plugin_ready(self, ref: str, cfg: dict) -> bool:
+        # ponytail: `claude plugin list` text is matched by plugin name; cached 10 min so a run
+        # does not pay for the CLI call each time
+        name, now = ref.split("@")[0], self.clock()
+        for attempt in (0, 1):
+            cache = self._plugin_cache
+            if attempt or not cache or (now - cache[0]).total_seconds() > PLUGIN_CACHE_S:
+                try:
+                    if attempt:
+                        await self.plugin_sync(cfg.get("CLAUDE_PLUGINS", plugins.DEFAULT))
+                    self._plugin_cache = (now, await self.plugin_list() or "")
+                except Exception:
+                    log.warning("plugin check failed", exc_info=True)
+                    self._plugin_cache = None
+                    continue
+            if name in self._plugin_cache[1]:
+                return True
+        return False
+
+    async def _resume_prompt(self, reqs: list[dict]) -> str:
+        """The latest answered request becomes the resume prompt. Answers are consumed here, except
+        an approved permission: the hook consumes that one when the exact call runs again."""
+        answered = sorted(
+            (r for r in reqs if r["status"] == "ANSWERED"), key=lambda r: r.get("createdAt") or ""
+        )
+        for r in answered:
+            if not (r["kind"] == "PERMISSION" and r.get("decision") == "ALLOW"):
+                await self.query.consume_request(r["id"])
+        if not answered:
+            return RESUME_PROMPT
+        r = answered[-1]
+        q = r.get("question") or ""
+        if r["kind"] == "QUESTION":
+            return f"사용자 답변 (질문: {q}): {r.get('answer') or ''}\n이어서 진행해."
+        if r["kind"] == "PERMISSION" and r.get("decision") == "ALLOW":
+            return f"승인됨: `{q}`을 다시 실행해 이어서 진행해."
+        if r["kind"] == "PERMISSION":
+            return f"거부됨: `{q}` 동작 없이 진행하거나 대안을 제시해."
+        return RESUME_PROMPT
+
+    async def _request_wait(self, task: dict, req: dict, sid: str | None) -> None:
+        t = await self.query.transition(task["id"], "RUNNING", "WAITING", cliSessionId=sid)
+        if t:
+            await self._notify(
+                "WAITING",
+                f"응답 대기: {_label(t)}",
+                format_request(t, req),
+                request_buttons(t["id"], req),
+            )
+
+    async def create_dev_task(self, plan: dict) -> dict:
+        """DEV child of a finished PLAN task: WAITING with an OPEN START request ([실행]/[취소])."""
+        path = plan.get("planDocPath")
+        ref = path or f'기획 작업 결과("{plan.get("resultSummary") or "-"}")를 기준으로,'
+        prompt = DEV_TEMPLATE.replace("{plan}", ref)
+        if plan.get("issueKey"):
+            ws = next(
+                (
+                    w
+                    for w in await self.query.get_workspaces() or []
+                    if w.get("projectKey") == plan.get("projectKey")
+                ),
+                None,
+            )
+            issue = await self.query.issue_by_key(plan["issueKey"])
+            if ws and ws.get("promptTemplate") and issue:
+                prompt = (
+                    render_prompt(
+                        ws["promptTemplate"],
+                        issue["issueKey"],
+                        issue.get("title") or "",
+                        issue.get("content") or "",
+                    )
+                    + f"\n\n{ref} 기획서대로 구현해."
+                )
+        status, dev = await self.query.create_task(
+            {
+                "issueKey": plan.get("issueKey"),
+                "source": plan.get("source") or "API",
+                "projectKey": plan["projectKey"],
+                "workspacePath": plan["workspacePath"],
+                "prompt": prompt,
+                "toolCd": plan["toolCd"],
+                "exhaustPolicy": plan.get("exhaustPolicy"),
+                "fallbackTools": plan.get("fallbackTools"),
+                "status": "WAITING",
+                "phase": "DEV",
+                "parentTaskId": plan["id"],
+            }
+        )
+        if status == 409:
+            raise RuntimeError(f"active task already exists for {plan.get('issueKey')}")
+        if "objId" in dev:
+            dev["id"] = dev.pop("objId")
+        _, req = await self.query.create_request(
+            dev["id"],
+            {
+                "kind": "START",
+                "question": "기획이 끝났습니다. 개발을 시작할까요?",
+                "options": ["실행", "취소"],
+                "recommend": 0,
+            },
+        )
+        body = (
+            f"{_label(plan)}\n결과: {plan.get('resultSummary') or '-'}\n"
+            f"기획서: {path or '기획서 경로 확인 실패'}\n요청 ID: {req['id']}"
+        )
+        await self._notify(
+            "PLAN_DONE", f"기획 완료: {_label(plan)}", body, request_buttons(dev["id"], req)
+        )
+        return dev
+
+    async def _plan_done(self, task: dict, ev, sid, now) -> None:
+        path = plan_doc_path(ev.result_line, task["workspacePath"])
+        t = await self.query.transition(
+            task["id"],
+            "RUNNING",
+            "DONE",
+            resultSummary=ev.result_line,
+            cliSessionId=sid,
+            finishedAt=to_query_ts(now),
+            planDocPath=path,
+        )
+        if not t:
+            return
+        try:
+            await self.create_dev_task(t)
+        except Exception as e:
+            log.warning("dev task for %s failed", task["id"], exc_info=True)
+            await self._notify(
+                "FAILED",
+                f"개발 작업 생성 실패: {_label(t)}",
+                f"{_label(t)}\n{type(e).__name__}: {e}\n"
+                "웹 작업 상세에서 [개발 작업 만들기]를 누르세요.",
+            )
+
+    async def _run_once(
+        self, task: dict, tool: dict, cfg: dict, session: str | None, reqs: list[dict] = ()
+    ):
         tid, cd = task["id"], task["toolCd"]
         runs = (await self.query.get_task(tid) or {}).get("runs") or []
         seq = max((r.get("runSeq") or 0 for r in runs), default=0) + 1
         adapter, model = ADAPTERS[cd], tool.get("model") or None
+        system = PROTOCOL if adapter.system_prompt else None
         if session:
-            argv, prompt = adapter.resume_argv(session, model), RESUME_PROMPT
+            argv = adapter.resume_argv(session, model, system)
+            prompt = await self._resume_prompt(list(reqs))
         else:  # earlier runs without a session to resume: another tool/session left changes
-            argv, prompt = adapter.new_argv(model), task["prompt"] + (SWITCH_NOTE if runs else "")
+            argv = adapter.new_argv(model, system)
+            await self._resume_prompt(list(reqs))  # consume answers (e.g. START [실행])
+            skill = task.get("_skill")
+            history = "".join(
+                f"\n- 질문: {r.get('question')}\n  답변: {r.get('answer')}"
+                for r in reqs
+                if r["kind"] == "QUESTION" and r.get("answer")
+            )
+            parts = [
+                skill and skill["invokeText"],
+                task["prompt"] + (SWITCH_NOTE if runs else ""),
+                history and f"[이전 질문·답변]{history}",
+                None if system else PROTOCOL,
+            ]
+            prompt = "\n\n".join(p for p in parts if p)
         exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)
         data_dir = Path(self.settings.data_dir)
         log_path = data_dir / "logs" / tid / f"{seq}.log"
         env = self._env(tool)
         run = await self.query.start_run(tid, seq, cd)
+        token = secrets.token_urlsafe(32)
+        self.hook_tokens[token] = (tid, run["id"])
+        env.update(
+            AYN_TASK_ID=tid,
+            AYN_RUN_ID=run["id"],
+            AYN_HOOK_TOKEN=token,
+            AYN_HOOK_URL=self.settings.hook_url,
+        )
+        try:
+            res = await self._spawn(task, cfg, argv, prompt, log_path, exe, env)
+        finally:
+            self.hook_tokens.pop(token, None)
+        return await self._record(task, tool, res, run, log_path, data_dir)
+
+    async def _spawn(self, task, cfg, argv, prompt, log_path, exe, env):
+        tid, cd = task["id"], task["toolCd"]
         if exe is None:  # not installed, or override not absolute
             res = RunResult("FAILED", RunEvent(), None, f"{EXE_MISSING}: {cd}")
         else:
@@ -411,6 +648,10 @@ class Scheduler:
             except Exception as e:  # still close the run record
                 log.exception("runner failed for %s", tid)
                 res = RunResult("FAILED", RunEvent(), None, f"{type(e).__name__}: {e}")
+        return res
+
+    async def _record(self, task, tool, res, run, log_path, data_dir):
+        cd = task["toolCd"]
         ev, now = res.event, self.clock()
         body = {
             "outcome": res.outcome,
@@ -439,7 +680,7 @@ class Scheduler:
                 await apply_quotas(self.query, self, cd, rows, NOTIFY)
         except Exception:
             log.warning("quota update failed for %s", cd, exc_info=True)
-        return res, rows
+        return res, rows, run["id"]
 
     async def _budget_row(self, tool: dict, ev, now: datetime) -> dict | None:
         if tool.get("authMode") != "API_KEY" or not tool.get("budgetTokens"):
@@ -461,11 +702,36 @@ class Scheduler:
             used = prev.get("usedTokens") or 0
         return budget_quota(tool, used + ev.input_tokens + ev.output_tokens, now)
 
-    async def _settle(self, task: dict, res, rows: list[dict], sid: str | None) -> None:
+    async def _settle(self, task: dict, res, rows: list[dict], sid, run_id=None) -> None:
         cfg = await self._config()
         tid, now, ev = task["id"], self.clock(), res.event
         if res.outcome == "CANCELLED":
             return  # the API already moved the task; only the run record is finished
+        if res.outcome == "LIMIT_HIT":  # open requests stay open; claim sends it back to WAITING
+            await self._on_limit(task, cfg, ev, rows, sid, now)
+            return
+        reqs = await self.query.list_requests(task_id=tid) or []
+        open_req = next((r for r in reqs if r["status"] == "OPEN"), None)
+        if open_req:  # the permission hook asked a human during this run
+            await self._request_wait(task, open_req, sid)
+            return
+        if any(r["status"] == "ANSWERED" and r.get("runId") == run_id for r in reqs):
+            # answered before the CLI exited: skip WAITING and resume right away
+            t = await self.query.transition(
+                tid, "RUNNING", "QUEUED", cliSessionId=sid, resumeAt=to_query_ts(now)
+            )
+            if t:
+                self.wake()
+            return
+        if res.outcome == "COMPLETED" and ev.ask:
+            _, req = await self.query.create_request(
+                tid, {"kind": "QUESTION", "runId": run_id, **ev.ask}
+            )
+            await self._request_wait(task, req, sid)
+            return
+        if res.outcome == "COMPLETED" and task.get("phase") == "PLAN":
+            await self._plan_done(task, ev, sid, now)
+            return
         if res.outcome == "COMPLETED":
             t = await self.query.transition(
                 tid,
@@ -483,8 +749,6 @@ class Scheduler:
                     f"완료: {_label(t)}",
                     format_done(t, detail.get("tokenTotals") or {}, now - started),
                 )
-        elif res.outcome == "LIMIT_HIT":
-            await self._on_limit(task, cfg, ev, rows, sid, now)
         else:
             await self._fail(task, f"{res.outcome}\n{res.tail}", res.tail, sid, now)
 

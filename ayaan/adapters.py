@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from ayaan.rules import HOOK_MATCHER, parse_ask
+
 # versions pinned in docs/cli-probe.md (Cursor installs latest; unverified)
 TESTED_VERSIONS = {
     "CLAUDE": "2.1.322",
@@ -39,6 +41,7 @@ class RunEvent:
     session_missing: bool = False
     rate_limits: list[dict] = field(default_factory=list)
     json_seen: bool = False  # parse saw at least one JSON object
+    ask: dict | None = None  # AYAAN_ASK marker: the model stopped to ask the user
 
 
 def _scan(lines):
@@ -71,28 +74,52 @@ def _finish(tool, ev, texts, text_for_result):
     if SESSION_MISSING.search(blob):
         ev.session_missing = True
     ev.result_line = _result_line(text_for_result)
+    ev.ask = parse_ask(text_for_result)
     return ev
+
+
+# PreToolUse hook: every write/shell/network/MCP call asks ayaan (hook.py) first
+HOOK_SETTINGS = json.dumps(
+    {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": HOOK_MATCHER,
+                    "hooks": [{"type": "command", "command": "ayaan-hook", "timeout": 30}],
+                }
+            ]
+        }
+    }
+)
 
 
 class Claude:
     prompt_in_argv = False
+    system_prompt = True  # protocol block goes to --append-system-prompt, kept on resume
     tool = "CLAUDE"
 
-    def _base(self, model):
+    def _base(self, model, system=None):
+        # ponytail: bypass mode stays; cli-probe step 0 must confirm a PreToolUse deny still
+        # applies under it, else switch to --permission-mode default + hook allow (spec 6.2)
         argv = [
             "-p",
             "--output-format",
             "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
+            "--disallowedTools",
+            "AskUserQuestion",
+            "--settings",
+            HOOK_SETTINGS,
         ]
+        argv += ["--append-system-prompt", system] if system else []
         return argv + (["--model", model] if model else [])
 
-    def new_argv(self, model):
-        return self._base(model)
+    def new_argv(self, model, system=None):
+        return self._base(model, system)
 
-    def resume_argv(self, session_id, model):
-        return ["--resume", session_id] + self._base(model)
+    def resume_argv(self, session_id, model, system=None):
+        return ["--resume", session_id] + self._base(model, system)
 
     def parse(self, lines):
         objs, plain = _scan(lines)
@@ -127,10 +154,11 @@ class Claude:
 
 class Codex:
     prompt_in_argv = False
+    system_prompt = False  # protocol block is appended to the prompt
     tool = "CODEX"
     _FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 
-    def new_argv(self, model):
+    def new_argv(self, model, system=None):
         return (
             ["exec"]
             + self._FLAGS
@@ -139,7 +167,7 @@ class Codex:
             + ["-"]
         )
 
-    def resume_argv(self, session_id, model):
+    def resume_argv(self, session_id, model, system=None):
         return (
             ["exec", "resume", session_id] + self._FLAGS + (["-m", model] if model else []) + ["-"]
         )
@@ -172,16 +200,17 @@ class Codex:
 
 class Gemini:
     prompt_in_argv = False
+    system_prompt = False
     tool = "GEMINI"
 
     def _base(self, model):
         # -p value is appended to stdin input; a blank (truthy) value forces headless mode
         return ["-o", "stream-json", "--yolo"] + (["-m", model] if model else []) + ["-p", " "]
 
-    def new_argv(self, model):
+    def new_argv(self, model, system=None):
         return self._base(model)
 
-    def resume_argv(self, session_id, model):
+    def resume_argv(self, session_id, model, system=None):
         return ["--resume", session_id] + self._base(model)
 
     def parse(self, lines):
@@ -211,6 +240,7 @@ class Cursor:
     # ponytail: prompt is the last argv item (no shell); Linux caps one arg at 128KB,
     # upgrade path: stdin if Cursor ever documents it
     prompt_in_argv = True
+    system_prompt = False
     tool = "CURSOR"
 
     def _base(self, model):
@@ -218,10 +248,10 @@ class Cursor:
             ["--model", model] if model else []
         )
 
-    def new_argv(self, model):
+    def new_argv(self, model, system=None):
         return self._base(model)
 
-    def resume_argv(self, session_id, model):
+    def resume_argv(self, session_id, model, system=None):
         return ["--resume", session_id] + self._base(model)
 
     def parse(self, lines):
@@ -239,12 +269,13 @@ class Cursor:
 
 class Fake:
     prompt_in_argv = False
+    system_prompt = False
     tool = "FAKE"
 
-    def new_argv(self, model):
+    def new_argv(self, model, system=None):
         return ["-m", "ayaan.fake_cli"]
 
-    def resume_argv(self, session_id, model):
+    def resume_argv(self, session_id, model, system=None):
         return ["-m", "ayaan.fake_cli"]
 
     def parse(self, lines):
