@@ -78,10 +78,11 @@ def test_empty_api_token_rejects_empty_header(env):
 
 def test_create_by_issue_key_renders_prompt(env):
     c, q = env[0], env[1]
-    r = c.post(f"{P}/tasks", json={"issueKey": "CIRA-1", "source": "WEB"}, headers=TOKEN)
+    body = {"issueKey": "CIRA-1", "source": "WEB", "phase": "DEV"}
+    r = c.post(f"{P}/tasks", json=body, headers=TOKEN)
     assert r.status_code == 201
     t = r.json()["data"]
-    assert t["prompt"] == "CIRA-1 Fix\nkeep {x} literal"
+    assert t["prompt"] == "CIRA-1 Fix\nkeep {x} literal" and t["phase"] == "DEV"
     assert t["status"] == "QUEUED" and t["toolCd"] == "CLAUDE" and t["id"] in q.tasks
     assert t["workspacePath"] == q.workspaces["CIRA"]["workspacePath"]
 
@@ -222,7 +223,7 @@ def test_setup_check_hides_api_key_value(env, monkeypatch):
     assert r.status_code == 200
     assert "sk-very-secret-value" not in r.text and "svc-token" not in r.text
     steps = r.json()["data"]
-    assert [s["step"] for s in steps] == [1, 2, 3, 4, 5, 6]
+    assert [s["step"] for s in steps] == [1, 2, 3, 4, 5, 6, 7]
     assert steps[1]["ok"] is True and steps[1]["items"][0]["name"] == "CLAUDE"
     assert steps[0]["ok"] is False  # /nonexistent/claude
     assert steps[5]["ok"] is True
@@ -370,3 +371,19 @@ def test_gemini_login_detected_by_either_credential_file(tmp_path, monkeypatch):
     (tmp_path / ".gemini" / "gemini-credentials.json").write_text("{}")
     files = setup_check.LOGIN_FILES["GEMINI"]
     assert any((tmp_path / f).is_file() for f in files)
+
+
+def test_setup_step7_session_retention(monkeypatch, tmp_path):
+    from ayaan import setup_check
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert setup_check._retention("CLAUDE")["ok"] is False
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude/settings.json").write_text('{"cleanupPeriodDays": 365}')
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini/settings.json").write_text(
+        '{"general": {"sessionRetention": {"maxAge": "30d"}}}'
+    )
+    assert setup_check._retention("CLAUDE")["ok"] is True
+    g = setup_check._retention("GEMINI")
+    assert g["ok"] is False and g["detail"].startswith("30 ")

@@ -57,3 +57,16 @@
 ## 결정: Cursor 프롬프트
 
 Cursor 는 문서대로 프롬프트를 마지막 위치 인자로 넘긴다 (stdin 미사용, 어댑터 `prompt_in_argv = True`). 셸을 쓰지 않아 안전하다. 한계: Linux 인자 하나 128KB.
+
+## TSTA-1 0단계 실측 (미완료 — 실제 로그인한 Claude 2.1.322로 확인 필요)
+
+구현은 아래 가정을 기준으로 했다. 실측하면 결과를 여기에 적고, 다르면 `adapters.Claude._base`를 고친다.
+
+| # | 가정 | 실측 결과 |
+|---|---|---|
+| 1 | `-p --dangerously-skip-permissions --settings '<hooks json>'`에서도 PreToolUse `permissionDecision: deny`가 적용된다. 적용되지 않으면 `--permission-mode default` + hook `allow`로 바꾼다 | 미확인 |
+| 2 | `--append-system-prompt`를 `--resume` 실행에도 다시 넘기면 규칙 블록이 유지된다 | 미확인 |
+| 3 | 모델이 `AYAAN_ASK:` 마커를 지킨다 | 미확인 |
+| 4 | `/superpowers:brainstorming` 같은 슬래시 skill 호출이 `-p` 프롬프트 첫 줄에서 동작한다 | 미확인 |
+| 5 | `--disallowedTools AskUserQuestion`이 질문 도구를 끈다 | 미확인 |
+| 6 | 세션 파일이 `/home/ayaan/.claude/projects/…` 아래에 있다 (Codex `~/.codex/sessions`, Gemini·Cursor는 미확인) | 미확인 |

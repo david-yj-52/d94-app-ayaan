@@ -53,3 +53,16 @@ def test_session_missing_detected():
 
 def test_prompt_in_argv_only_for_cursor():
     assert {t for t, a in ADAPTERS.items() if a.prompt_in_argv} == {"CURSOR"}
+
+
+def test_ask_marker_and_claude_gate_flags():
+    line = '{"type":"result","result":"x\\nAYAAN_ASK: {\\"question\\":\\"q\\",\\"options\\":[]}"}'
+    ev = ADAPTERS["CLAUDE"].parse([line])
+    assert ev.ask == {"question": "q", "options": [], "recommend": None, "context": None}
+    argv = ADAPTERS["CLAUDE"].new_argv(None, "SYS")
+    assert argv[argv.index("--append-system-prompt") + 1] == "SYS"
+    assert argv[argv.index("--disallowedTools") + 1] == "AskUserQuestion"
+    hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"][0]
+    assert hook["hooks"][0]["command"] == "ayaan-hook" and "Bash" in hook["matcher"]
+    assert "--append-system-prompt" in ADAPTERS["CLAUDE"].resume_argv("s", None, "SYS")
+    assert {t for t, a in ADAPTERS.items() if a.system_prompt} == {"CLAUDE"}

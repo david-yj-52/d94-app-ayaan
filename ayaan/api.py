@@ -21,10 +21,17 @@ from ayaan import plugins
 from ayaan.clients import EccClient, QueryClient, to_query_ts
 from ayaan.quota import collect_all
 from ayaan.rules import (
+    NO_SKILL,
+    PHASES,
+    PLAN_TEMPLATE,
     POLICIES,
     TOOLS,
+    input_hash,
+    permission_decision,
     render_prompt,
     validate_config,
+    validate_permissions,
+    validate_skill,
     validate_tool,
     validate_workspace,
 )
@@ -58,6 +65,24 @@ class TaskReq(BaseModel):
     exhaustPolicy: str | None = None
     fallbackTools: str | list[str] | None = None
     source: str = "API"
+    phase: str = "PLAN"  # every new task starts with planning unless DEV is asked (D7)
+    skillCd: str | None = None
+
+
+class AnswerReq(BaseModel):
+    answer: str | None = None
+    choice: int | None = None
+    answeredBy: str | None = None
+
+
+class HookReq(BaseModel):
+    toolName: str
+    input: dict[str, Any] = {}
+
+
+LOCALHOST = {"127.0.0.1", "::1"}
+# answers of fixed-choice requests: choice index -> decision
+CHOICE_DECISION = {"PERMISSION": ("ALLOW", "DENY"), "START": ("ALLOW", "DENY")}
 
 
 def ok(data: Any) -> dict:
@@ -132,13 +157,14 @@ def create_app(
     def require_caller(
         x_ayaan_token: str | None = Header(None),
         authorization: str | None = Header(None),
-    ) -> None:
+    ) -> str:
+        """-> caller id: "service" (ECC token) or "web:<sub>" (JWT)."""
         if (
             x_ayaan_token is not None
             and settings.api_token
             and secrets.compare_digest(x_ayaan_token.encode(), settings.api_token.encode())
         ):
-            return
+            return "service"
         if authorization and authorization.startswith("Bearer ") and settings.jwt_secret_key:
             try:
                 claims = jwt.decode(
@@ -152,7 +178,7 @@ def create_app(
             # d94 registration is open: a valid signature alone must not run code here
             if claims.get("sub") not in settings.allowed_subjects:
                 raise ApiError(403, "forbidden")
-            return
+            return f"web:{claims['sub']}"
         raise ApiError(401, "unauthorized")
 
     app = FastAPI(
@@ -198,6 +224,56 @@ def create_app(
     async def health():
         return {"status": "UP", "service": settings.service_name}
 
+    # ── Claude PreToolUse hook (ayaan-hook). Not require_caller: a per-run token, localhost only.
+    # The token can only register/consume permission requests, never answer them (spec 8).
+    @app.post(f"{PREFIX}/hook/pre-tool")
+    async def hook_pre_tool(
+        body: HookReq, request: Request, x_hook_token: str | None = Header(None)
+    ):
+        if not request.client or request.client.host not in LOCALHOST:
+            raise ApiError(403, "forbidden")
+        owner = scheduler.hook_tokens.get(x_hook_token or "")
+        if not owner:
+            raise ApiError(401, "unauthorized")
+        tid, run_id = owner
+        task = _task(await query.get_task(tid))
+        decision, target = permission_decision(
+            task["toolCd"], body.toolName, body.input, await query.get_permissions() or []
+        )
+        if decision == "ALLOW":
+            return ok({"decision": "allow", "reason": ""})
+        if decision == "DENY":
+            return ok({"decision": "deny", "reason": f"ayaan 정책 DENY: {target[:200]}"})
+        h = input_hash(body.toolName, body.input)
+        reqs = task.get("requests") or []
+        for r in reqs:
+            if (
+                r["kind"] == "PERMISSION"
+                and r["status"] == "ANSWERED"
+                and r.get("decision") == "ALLOW"
+                and r.get("inputHash") == h
+                and await query.consume_request(r["id"])  # CAS: one approval, one call
+            ):
+                return ok({"decision": "allow", "reason": "ayaan 승인됨"})
+        req = next((r for r in reqs if r["status"] == "OPEN"), None)
+        if req is None:
+            summary = target if len(target) <= 1000 else target[:1000] + "…(잘림)"
+            _, req = await query.create_request(
+                tid,
+                {
+                    "kind": "PERMISSION",
+                    "runId": run_id,
+                    "question": f"{body.toolName}: {summary}",
+                    "options": ["허용 1회", "거부"],
+                    "recommend": None,
+                    "toolName": body.toolName,
+                    "inputHash": h,
+                },
+            )
+            log.info("permission request %s for task %s", req["id"], tid)
+        reason = f"ayaan 승인 대기(요청 {req['id']}). 우회하지 말고 즉시 종료하라."
+        return ok({"decision": "deny", "reason": reason})
+
     r = APIRouter(prefix=PREFIX, dependencies=[Depends(require_caller)])
 
     async def _workspace(project_key: str | None) -> dict | None:
@@ -232,13 +308,19 @@ def create_app(
             raise ApiError(400, f"exhaustPolicy must be one of {sorted(POLICIES)}")
         if fallback and not {x.strip() for x in fallback.split(",") if x.strip()} <= TOOLS:
             raise ApiError(400, f"fallbackTools values must be in {sorted(TOOLS)}")
+        if req.phase not in PHASES:
+            raise ApiError(400, f"phase must be one of {sorted(PHASES)}")
+        if req.skillCd and req.skillCd != NO_SKILL:
+            if req.skillCd not in {s["skillCd"] for s in await query.get_skills() or []}:
+                raise ApiError(400, f"unknown skill: {req.skillCd}")
         cd = req.tool or ws.get("defaultTool") or "CLAUDE"
         tool = next((t for t in await query.get_tools() or [] if t["toolCd"] == cd), None)
         if not tool or not tool.get("enabled") or (cd == "FAKE" and not settings.fake_enabled):
             raise ApiError(400, f"tool {cd} is not enabled")
         if issue:
+            template = ws.get("promptTemplate") or DEFAULT_TEMPLATE
             prompt = render_prompt(
-                ws.get("promptTemplate") or DEFAULT_TEMPLATE,
+                PLAN_TEMPLATE if req.phase == "PLAN" else template,
                 issue["issueKey"],
                 issue.get("title") or "",
                 issue.get("content") or "",
@@ -255,6 +337,8 @@ def create_app(
                 "toolCd": cd,
                 "exhaustPolicy": req.exhaustPolicy,
                 "fallbackTools": fallback,
+                "phase": req.phase,
+                "skillCd": req.skillCd,
             }
         )
         if status == 409:
@@ -282,17 +366,77 @@ def create_app(
             if t:
                 scheduler.wake()
                 return ok(_task(t))
+        if (await query.get_task(task_id) or {}).get("status") == "WAITING":
+            raise ApiError(409, "답변이 필요합니다 (응답 대기 중인 작업은 답변이 곧 재개입니다)")
         raise ApiError(409, "only PAUSED or FAILED tasks can be resumed")
 
     @r.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str):
-        for expected in ("QUEUED", "PAUSED", "RUNNING"):
+        for expected in ("QUEUED", "PAUSED", "RUNNING", "WAITING"):
             t = await query.transition(task_id, expected, "CANCELLED")
             if t:
                 if expected == "RUNNING":
                     kill_task(task_id)
+                for r in await query.list_requests("OPEN", task_id) or []:
+                    await query.cancel_request(r["id"])
                 return ok(_task(t))
-        raise ApiError(409, "only QUEUED, PAUSED or RUNNING tasks can be cancelled")
+        raise ApiError(409, "only QUEUED, PAUSED, RUNNING or WAITING tasks can be cancelled")
+
+    @r.post("/tasks/{task_id}/dev-task", status_code=201)
+    async def dev_task(task_id: str):
+        plan = _task(await query.get_task(task_id))
+        if plan.get("phase") != "PLAN" or plan.get("status") != "DONE":
+            raise ApiError(409, "only DONE planning tasks can create a dev task")
+        children = [
+            t
+            for t in await query.list_tasks() or []
+            if t.get("parentTaskId") == task_id and t.get("status") != "CANCELLED"
+        ]
+        if children:
+            raise ApiError(409, data=_task(children[0]))
+        return ok(await scheduler.create_dev_task(plan))
+
+    # ── human requests ──
+    @r.get("/requests")
+    async def list_requests(status: str | None = None, taskId: str | None = None):
+        return ok(await query.list_requests(status, taskId) or [])
+
+    @r.post("/requests/{req_id}/answer")
+    async def answer_request(req_id: str, body: AnswerReq, caller: str = Depends(require_caller)):
+        req = await query.get_request(req_id)
+        if not req:
+            raise ApiError(404, f"request not found: {req_id}")
+        if req["status"] != "OPEN":
+            raise ApiError(409, data=req)
+        opts, kind = req.get("options") or [], req["kind"]
+        decision = None
+        if body.choice is not None:  # callback_data is untrusted: range-check the index
+            if not 0 <= body.choice < len(opts):
+                raise ApiError(422, data={"choice": f"must be 0~{len(opts) - 1}"})
+            answer = opts[body.choice]
+            if kind in CHOICE_DECISION:
+                decision = CHOICE_DECISION[kind][body.choice]
+        elif kind == "QUESTION" and (body.answer or "").strip():
+            answer = body.answer.strip()[:4000]
+        else:
+            raise ApiError(422, data={"answer": "choice required (free text only for QUESTION)"})
+        # ECC (service token) passes the Telegram user; a web caller is its JWT subject
+        by = (body.answeredBy or "service") if caller == "service" else caller
+        done = await query.answer_request(
+            req_id, {"answer": answer, "decision": decision, "answeredBy": by[:100]}
+        )
+        if not done:  # someone answered first (CAS)
+            raise ApiError(409, data=await query.get_request(req_id))
+        log.info("request %s (%s) answered", req_id, kind)
+        tid = req["taskId"]
+        if kind == "START" and decision == "DENY":
+            await query.transition(tid, "WAITING", "CANCELLED")
+        else:
+            # not WAITING yet (answered before the CLI exited): settle requeues it
+            now = to_query_ts(scheduler.clock())
+            if await query.transition(tid, "WAITING", "QUEUED", resumeAt=now):
+                scheduler.wake()
+        return ok(done)
 
     # ── quotas ──
     async def _quotas() -> dict:
@@ -318,6 +462,33 @@ def create_app(
         clean = {k: "" if v is None else str(v) for k, v in values.items()}
         return ok(await query.put_config(clean))
 
+    @r.get("/skills")
+    async def get_skills():
+        return ok(await query.get_skills())
+
+    @r.put("/skills/{cd}")
+    async def put_skill(cd: str, body: dict[str, Any] = Body(...)):
+        body.pop("skillCd", None)
+        spec = (await query.get_config() or {}).get("CLAUDE_PLUGINS", plugins.DEFAULT)
+        errs, warnings = validate_skill(cd, body, spec)
+        _invalid(errs)
+        body["pluginRef"] = body.get("pluginRef") or None
+        return ok({"skill": await query.put_skill(cd, body), "warnings": warnings})
+
+    @r.delete("/skills/{cd}")
+    async def delete_skill(cd: str):
+        return ok(await query.delete_skill(cd))
+
+    @r.get("/permissions")
+    async def get_permissions():
+        return ok(await query.get_permissions())
+
+    @r.put("/permissions")
+    async def put_permissions(rows: list[Any] = Body(...)):
+        _invalid(validate_permissions(rows))
+        clean = [{k: v for k, v in r.items() if k != "id"} for r in rows]
+        return ok(await query.put_permissions(clean))
+
     @r.get("/tools")
     async def get_tools():
         return ok(await query.get_tools())
@@ -329,7 +500,13 @@ def create_app(
             raise ApiError(404, f"unknown tool: {cd}")
         body.pop("toolCd", None)
         merged = {**current, **body}
-        _invalid(validate_tool(merged))
+        errs = validate_tool(merged)
+        skills = {s["skillCd"] for s in await query.get_skills() or []}
+        for k in ("planSkillCd", "devSkillCd"):
+            if merged.get(k) and merged[k] not in skills:
+                errs[k] = "unknown skill"
+            merged[k] = merged.get(k) or None
+        _invalid(errs)
         merged.pop("toolCd", None)
         return ok(await query.put_tool(cd, merged))  # d94-query PUT replaces every field
 

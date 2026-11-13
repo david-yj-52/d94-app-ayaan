@@ -18,7 +18,7 @@ SEED_CONFIG = {
     "QUOTA_POLL_INTERVAL_SEC": "300",
     "CLAUDE_USAGE_POLL": "true",
     "REPORT_CRON": "0 9,18 * * *",
-    "NOTIFY_EVENTS": "PAUSED,RESUMED,DONE,FAILED,QUOTA_EXHAUSTED,QUOTA_RESTORED",
+    "NOTIFY_EVENTS": "PAUSED,RESUMED,DONE,FAILED,QUOTA_EXHAUSTED,QUOTA_RESTORED,WAITING,PLAN_DONE",
     "DEFAULT_PROJECT_KEY": "",
 }
 SEED_RULES = {
@@ -40,7 +40,44 @@ TRANSITION_FIELDS = {
     "leaseUntil",
     "startedAt",
     "finishedAt",
+    "planDocPath",
 }
+ACTIVE = ("QUEUED", "RUNNING", "PAUSED", "WAITING")
+SEED_SKILLS = [
+    {
+        "skillCd": "BRAINSTORM",
+        "skillNm": "Brainstorming",
+        "toolCd": "CLAUDE",
+        "phase": "PLAN",
+        "invokeText": "/superpowers:brainstorming",
+        "pluginRef": "superpowers@superpowers-marketplace",
+        "description": None,
+        "enabled": True,
+        "sortNo": 10,
+    },
+    {
+        "skillCd": "PONYTAIL",
+        "skillNm": "Ponytail",
+        "toolCd": "CLAUDE",
+        "phase": "DEV",
+        "invokeText": "/ponytail:ponytail",
+        "pluginRef": "ponytail@ponytail",
+        "description": None,
+        "enabled": True,
+        "sortNo": 20,
+    },
+]
+SEED_PERMISSIONS = [
+    ("FILE_WRITE", "*", "ALLOW", 0),
+    ("SHELL", "*", "ALLOW", 0),
+    ("NETWORK", "*", "ALLOW", 0),
+    ("MCP", "*", "ALLOW", 0),
+    ("GIT_PUSH", "*", "ASK", 0),
+    ("DEPLOY", "docker", "ASK", 0),
+    ("DEPLOY", "kubectl", "ASK", 0),
+    ("FILE_WRITE", "**/.env*", "DENY", 10),
+    ("SHELL", "rm -rf /", "DENY", 10),
+]
 
 
 class FakeClock:
@@ -64,6 +101,9 @@ class InMemoryQuery:
         self.runs: dict[str, dict] = {}
         self.workspaces: dict[str, dict] = {}
         self.issues: dict[str, dict] = {}
+        self.skills: dict[str, dict] = {}
+        self.permissions: list[dict] = []
+        self.requests: dict[str, dict] = {}
         self.fail_finish = 0  # number of finish_run calls that raise
 
     @classmethod
@@ -82,7 +122,15 @@ class InMemoryQuery:
                 "fallbackResetRule": rule,
                 "budgetTokens": None,
                 "budgetPeriod": None,
+                "planSkillCd": "BRAINSTORM" if cd == "CLAUDE" else None,
+                "devSkillCd": "PONYTAIL" if cd == "CLAUDE" else None,
             }
+        q.skills = {s["skillCd"]: dict(s) for s in SEED_SKILLS}
+        q.permissions = [
+            {"id": f"p{i}", "toolCd": "*", "category": c, "matcher": m, "decision": d}
+            | {"priority": n}
+            for i, (c, m, d, n) in enumerate(SEED_PERMISSIONS)
+        ]
         return q
 
     # ── test helpers ──
@@ -111,6 +159,10 @@ class InMemoryQuery:
             "failReason": None,
             "startedAt": None,
             "finishedAt": None,
+            "phase": "DEV",
+            "skillCd": None,
+            "parentTaskId": None,
+            "planDocPath": None,
             "createdAt": to_query_ts(self.clock() + timedelta(microseconds=len(self.tasks))),
             **fields,
         }
@@ -154,7 +206,7 @@ class InMemoryQuery:
     async def create_task(self, body):
         key = body.get("issueKey")
         for t in self.tasks.values():
-            if key and t["issueKey"] == key and t["status"] in ("QUEUED", "RUNNING", "PAUSED"):
+            if key and t["issueKey"] == key and t["status"] in ACTIVE:
                 return 409, dict(t)
         tid = self.add_task(**body)
         return 201, dict(self.tasks[tid])
@@ -177,6 +229,7 @@ class InMemoryQuery:
             "cacheWrite": sum(r.get("cacheWriteTokens") or 0 for r in runs),
             "costUsd": None,
         }
+        t["requests"] = [dict(r) for r in self.requests.values() if r["taskId"] == task_id]
         return t
 
     async def transition(self, task_id, expected, next, **fields):
@@ -251,6 +304,84 @@ class InMemoryQuery:
 
     async def issue_by_key(self, key):
         return self.issues.get(key)
+
+    # skills / permissions
+    async def get_skills(self):
+        return [dict(s) for s in sorted(self.skills.values(), key=lambda s: s["sortNo"])]
+
+    async def put_skill(self, cd, body):
+        self.skills[cd] = {"enabled": True, "sortNo": 0, **body, "skillCd": cd}
+        return dict(self.skills[cd])
+
+    async def delete_skill(self, cd):
+        self.skills.pop(cd)
+        for t in self.tools.values():
+            for k in ("planSkillCd", "devSkillCd"):
+                if t.get(k) == cd:
+                    t[k] = None
+
+    async def get_permissions(self):
+        return [dict(p) for p in self.permissions]
+
+    async def put_permissions(self, rows):
+        self.permissions = [{**r, "id": f"p{i}"} for i, r in enumerate(rows)]
+        return [dict(p) for p in self.permissions]
+
+    # requests
+    async def create_request(self, task_id, body):
+        for r in self.requests.values():
+            if r["taskId"] == task_id and r["status"] == "OPEN":
+                return 409, dict(r)
+        rid = f"q{len(self.requests) + 1}"
+        self.requests[rid] = {
+            "id": rid,
+            "taskId": task_id,
+            "runId": None,
+            "question": None,
+            "options": [],
+            "recommend": None,
+            "context": None,
+            "toolName": None,
+            "inputHash": None,
+            "answer": None,
+            "decision": None,
+            "answeredBy": None,
+            "answeredAt": None,
+            "consumedAt": None,
+            **body,
+            "status": "OPEN",
+            "createdAt": to_query_ts(self.clock() + timedelta(microseconds=len(self.requests))),
+        }
+        return 201, dict(self.requests[rid])
+
+    async def list_requests(self, status=None, task_id=None):
+        return [
+            dict(r)
+            for r in self.requests.values()
+            if (not status or r["status"] == status) and (not task_id or r["taskId"] == task_id)
+        ]
+
+    async def get_request(self, req_id):
+        r = self.requests.get(req_id)
+        return dict(r) if r else None
+
+    def _cas(self, req_id, expected, **fields):
+        r = self.requests[req_id]
+        if r["status"] != expected:
+            return None
+        r.update(fields)
+        return dict(r)
+
+    async def answer_request(self, req_id, body):
+        now = to_query_ts(self.clock())
+        return self._cas(req_id, "OPEN", status="ANSWERED", answeredAt=now, **body)
+
+    async def consume_request(self, req_id):
+        now = to_query_ts(self.clock())
+        return self._cas(req_id, "ANSWERED", status="CONSUMED", consumedAt=now)
+
+    async def cancel_request(self, req_id):
+        return self._cas(req_id, "OPEN", status="CANCELLED")
 
 
 class FakeEcc:

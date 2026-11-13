@@ -15,6 +15,7 @@ from fakes import (
 
 from ayaan.adapters import ADAPTERS
 from ayaan.clients import to_query_ts
+from ayaan.rules import PROTOCOL
 from ayaan.runner import write_spool
 from ayaan.scheduler import RESUME_PROMPT, SWITCH_NOTE, Scheduler, format_report
 from ayaan.settings import Settings
@@ -32,7 +33,18 @@ def _setup(script, settings, ecc=None, gate=None):
     clock = FakeClock(NOW)
     q, ecc = InMemoryQuery.seeded(clock), ecc or FakeEcc()
     runner = fake_runner(script, gate=gate)
-    return q, ecc, clock, runner, Scheduler(q, ecc, settings, clock=clock, runner=runner)
+    s = Scheduler(q, ecc, settings, clock=clock, runner=runner)
+    s.plugin_list = _plugins("ponytail@ponytail superpowers@superpowers-marketplace")
+    return q, ecc, clock, runner, s
+
+
+def _plugins(output):
+    async def installed():
+        installed.calls += 1
+        return output
+
+    installed.calls = 0
+    return installed
 
 
 async def test_limit_then_auto_resume_same_session(settings):
@@ -52,7 +64,7 @@ async def test_limit_then_auto_resume_same_session(settings):
     clock.advance(3600 + 120 + 1)
     await s.tick()
     await s.drain()
-    assert runner.calls[1].argv_tail == ADAPTERS["CLAUDE"].resume_argv("s1", None)
+    assert runner.calls[1].argv_tail == ADAPTERS["CLAUDE"].resume_argv("s1", None, PROTOCOL)
     assert runner.calls[1].prompt == RESUME_PROMPT
     assert q.task(tid)["status"] == "DONE" and q.task(tid)["resultSummary"] == "done"
     assert ecc.events() == ["PAUSED", "RESUMED", "DONE"]
@@ -73,7 +85,7 @@ async def test_switch_tool_policy_moves_to_next_available(settings):
     await s.tick()
     await s.drain()
     assert runner2.calls[0].argv_tail == ADAPTERS["CODEX"].new_argv(None)
-    assert runner2.calls[0].prompt == "do it" + SWITCH_NOTE
+    assert runner2.calls[0].prompt == "do it" + SWITCH_NOTE + "\n\n" + PROTOCOL
     assert q.task(tid)["status"] == "DONE"
 
 
@@ -175,7 +187,7 @@ async def test_recover_expired_lease_resumes_same_session(settings):
     assert q.task(tid)["pauseReason"] == "RECOVERED"
     await s.tick()
     await s.drain()
-    assert runner.calls[0].argv_tail == ADAPTERS["CLAUDE"].resume_argv("s9", None)
+    assert runner.calls[0].argv_tail == ADAPTERS["CLAUDE"].resume_argv("s9", None, PROTOCOL)
     assert q.task(tid)["status"] == "DONE"
 
 
@@ -253,9 +265,9 @@ async def test_session_missing_retries_new_session_once(settings):
     )
     await s.tick()
     await s.drain()
-    assert runner.calls[0].argv_tail == ADAPTERS["CLAUDE"].resume_argv("gone", None)
-    assert runner.calls[1].argv_tail == ADAPTERS["CLAUDE"].new_argv(None)
-    assert runner.calls[1].prompt == "do it" + SWITCH_NOTE
+    assert runner.calls[0].argv_tail == ADAPTERS["CLAUDE"].resume_argv("gone", None, PROTOCOL)
+    assert runner.calls[1].argv_tail == ADAPTERS["CLAUDE"].new_argv(None, PROTOCOL)
+    assert runner.calls[1].prompt == "/ponytail:ponytail\n\ndo it" + SWITCH_NOTE
     t = q.task(tid)
     assert (t["status"], t["cliSessionId"]) == ("DONE", "s2")
 

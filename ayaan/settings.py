@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     service_name: str = "d94-app-ayaan"
     claude_credentials_path: str = "/home/ayaan/.claude/.credentials.json"
     codex_sessions_dir: str = "/home/ayaan/.codex/sessions"
+    hook_url: str = "http://127.0.0.1:8080/tsh/api/v1/ayaan/hook/pre-tool"  # for ayaan-hook
 
     @property
     def workspace_root_paths(self) -> tuple[Path, ...]:
