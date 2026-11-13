@@ -24,7 +24,7 @@
 | D10 | 자유 텍스트 답변 방법 | 질문 메시지에 Telegram **답장(reply)** 하거나 `/answer <요청ID> <내용>`. 선택지가 있으면 버튼도 쓴다 | 버튼만 | 기획 질문은 선택지로 다 담기지 않는다. 답장 방식은 요청 ID를 원문 메시지에서 다시 읽으므로 ECC에 상태가 필요 없다 | §9 |
 | D11 | 누가 답할 수 있나? | 기존 `ECC_TELEGRAM_ALLOWED_USER_IDS` 전원과 웹 `JWT_ALLOWED_SUBJECTS` 전원. 먼저 답한 1건만 유효하다 | 특정 1인만 승인 가능(권한 승인 전용 allowlist) | 현재 사용자가 1인 운영이다. 다중 사용자가 되면 `ECC_APPROVER_USER_IDS`를 추가한다 | §8 |
 | D12 | 오래 대기하는 요청 상기 | 정기 리포트(`REPORT_CRON`)에 `WAITING` 목록과 요청 ID를 넣는다 | 대기 N시간마다 재알림 | 새 루프나 설정이 필요 없다 | §9.3 |
-| D13 | CLI 세션 보존 기간 | 컨테이너 HOME의 CLI 설정으로 보존 기간을 **365일**로 늘린다(Claude `cleanupPeriodDays`, Gemini `general.sessionRetention.maxAge`). 그래도 세션을 잃으면 기존 `session_missing` 대체 경로로 새로 실행하고, 질문·답변 이력을 프롬프트에 덧붙인다 | 기본값(30일) 유지 | 대기는 무기한인데 기본 보존은 30일이다(Claude 기본값은 미확인, Gemini 30d는 확인) | §5 |
+| D13 | CLI 세션 보존 기간 | 컨테이너 HOME의 CLI 설정으로 보존 기간을 **365일**로 늘리도록 설치 점검(setup)이 확인·안내한다(Claude `cleanupPeriodDays`, Gemini `general.sessionRetention.maxAge`. 자동으로 덮어쓰지 않음). 그래도 세션을 잃으면 기존 `session_missing` 대체 경로로 새로 실행하고, 질문·답변 이력을 프롬프트에 덧붙인다 | 기본값(30일) 유지 | 대기는 무기한인데 기본 보존은 30일이다(Claude 기본값은 미확인, Gemini 30d는 확인) | §5 |
 | D14 | 이 설계서의 반영 방식 | 이슈 본문은 "main에 직접 push"를 요구하지만, 이번 실행 지침은 main 직접 push를 금지하고 PR을 요구한다. **`ayaan/TSTA-1` 브랜치 + PR**로 올렸다 | main 직접 커밋 | 더 안전한 쪽 지침을 따랐다. 머지 여부는 사용자가 정한다 | — |
 
 ---
@@ -252,6 +252,8 @@ Claude 도구 → 범주 매핑: `Edit|Write|MultiEdit|NotebookEdit` → FILE_WR
 ## 9. 저장소별 변경점
 
 ### 9.1 d94-app-query (V530 마이그레이션 하나)
+> 기준 브랜치는 `origin/main`이다(ayaan 테이블 V500·V520이 있음). 작업공간의 로컬 체크아웃은 오래된 `master`(Initial commit)에 있으니 구현 전에 `main`으로 전환해야 한다. 마지막 마이그레이션이 V520이라 다음 번호는 V530이다.
+
 ```sql
 -- V530__ayaan_skill_permission_request.sql (공통 감사 컬럼 SRV_ID…MODIFIED_BY는 기존 표준대로)
 CREATE TABLE SN_AYN_SKILL (SKILL_CD VARCHAR(50) PK, SKILL_NM VARCHAR(100) NOT NULL, TOOL_CD VARCHAR(20) NOT NULL,
@@ -287,10 +289,10 @@ CREATE UNIQUE INDEX ux_ayn_task_active_issue ON SN_AYN_TASK (ISSUE_KEY)
 ### 9.2 d94-app-ayaan
 | 파일 | 변경 |
 |---|---|
-| `rules.py` | `STATUSES`에 WAITING, `NOTIFY`에 `WAITING`, `PLAN_DONE`. `validate_skill`, `validate_permission`, `permission_decision`(순수), `parse_ask`, `plan_doc_path(result, workspace)` |
+| `rules.py` | `NOTIFY`에 `WAITING`, `PLAN_DONE` 추가(상태 목록 상수는 없음 — 상태값은 query와 문자열로 주고받는다). `validate_skill`, `validate_permission`, `permission_decision`(순수), `parse_ask`, `plan_doc_path(result, workspace)` |
 | `adapters.py` | `RunEvent.ask`. `_finish`에서 `AYAAN_ASK` 파싱. Claude: `--append-system-prompt`, `--disallowedTools AskUserQuestion`, `--settings`(hook). 각 Tool `permission_args(policies)` |
 | `hook.py`(신규) | `ayaan-hook` 콘솔 스크립트(표준 라이브러리 `urllib`만 사용) |
-| `scheduler.py` | 프롬프트 조립(skill + 프로토콜), 플러그인 확인(D6), `_settle` 판정 순서(§4.3), WAITING 전이와 알림, 답변 기반 재개 프롬프트, PLAN 완료 → 개발 작업 생성, 리포트에 WAITING 목록 추가 |
+| `scheduler.py` | `_STATUS_KO`(리포트 라벨)에 `("WAITING", "응답 대기")` 추가. 프롬프트 조립(skill + 프로토콜), 플러그인 확인(D6), `_settle` 판정 순서(§4.3), WAITING 전이와 알림, 답변 기반 재개 프롬프트, PLAN 완료 → 개발 작업 생성, 리포트에 WAITING 목록 추가 |
 | `api.py` | `TaskReq.phase/skillCd`. `GET/PUT/DELETE /skills`, `GET/PUT /permissions`, `GET /requests`, `POST /requests/{id}/answer`(answer 또는 choice, answeredBy), `POST /tasks/{id}/dev-task`, `POST /hook/pre-tool`(hook 토큰 + localhost, `require_caller` 제외). `cancel`에 WAITING 추가 |
 | `clients.py` | 위 query 엔드포인트용 메서드 |
 | `setup_check.py` | 단계 7: 세션 보존 설정, skill 플러그인 설치 상태 |
