@@ -2,7 +2,11 @@
 
 import json
 import logging
+import re
+import shutil
+import time
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,6 +20,14 @@ from ayaan.settings import Settings
 log = logging.getLogger(__name__)
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
+GEMINI_API = "https://cloudcode-pa.googleapis.com/v1internal:"
+_GEMINI_CONST = re.compile(r'var (OAUTH_CLIENT_(?:ID|SECRET)) = "([^"]+)"')
+_GEMINI_META = {
+    "ideType": "IDE_UNSPECIFIED",
+    "platform": "PLATFORM_UNSPECIFIED",
+    "pluginType": "GEMINI",
+}
 CLAUDE_WARNING = "Claude 비공식 usage 조회 실패 — 자동으로 껐습니다 (실행 결과 기반으로만 갱신)"
 _WINDOW_KO = {
     "FIVE_HOUR": "5시간",
@@ -53,6 +65,8 @@ def _window_from_minutes(minutes) -> str | None:
         return "FIVE_HOUR"
     if abs(minutes - 10080) <= 720:
         return "WEEKLY"
+    if abs(minutes - 43200) <= 1440:  # codex free plan: one 30-day window
+        return "MONTHLY"
     return None
 
 
@@ -88,6 +102,99 @@ async def collect_claude(http: httpx.AsyncClient, credentials_path: Path) -> lis
     if not rows:
         raise QuotaUnavailable("no usable windows")
     return rows
+
+
+async def collect_cursor(http: httpx.AsyncClient, auth_path: Path) -> list[dict]:
+    """Cursor dashboard usage with the agent CLI's own token (unofficial, same as the IDE)."""
+    try:
+        tok = json.loads(Path(auth_path).read_text())["accessToken"]
+        resp = await http.post(
+            CURSOR_USAGE_URL,
+            headers={
+                "Authorization": f"Bearer {tok}",
+                "Content-Type": "application/json",
+                "Connect-Protocol-Version": "1",
+            },
+            content=b"{}",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        pct = (body.get("planUsage") or {}).get("totalPercentUsed")
+        end = body.get("billingCycleEnd")
+        at = datetime.fromtimestamp(int(end) / 1000, UTC) if end else None
+    except Exception as e:  # never include the token / request headers
+        raise QuotaUnavailable(type(e).__name__) from None
+    if pct is None:
+        return []
+    return [_row("CURSOR", "MONTHLY", float(pct), at, "USAGE_API", datetime.now(UTC))]
+
+
+@lru_cache(maxsize=1)
+def _gemini_oauth() -> dict:
+    """gemini-cli's public installed-app OAuth client, read from the installed CLI bundle
+    (kept out of the repo: push protection flags it, and it follows the CLI version)."""
+    exe = shutil.which("gemini")
+    found = {}
+    for f in Path(exe).resolve().parent.glob("*.js") if exe else ():
+        found.update(_GEMINI_CONST.findall(f.read_text(errors="ignore")))
+        if len(found) == 2:
+            return {
+                "client_id": found["OAUTH_CLIENT_ID"],
+                "client_secret": found["OAUTH_CLIENT_SECRET"],
+            }
+    raise QuotaUnavailable("gemini-cli oauth client not found")
+
+
+async def collect_gemini(
+    http: httpx.AsyncClient, creds_path: Path, model: str | None = None
+) -> list[dict]:
+    """Code Assist quota for a Google-login gemini-cli (oauth_creds.json; API-key mode has none)."""
+    try:
+        c = json.loads(Path(creds_path).read_text())
+        tok = c.get("access_token")
+        if not tok or (c.get("expiry_date") or 0) / 1000 < time.time() + 60:
+            # ponytail: refreshed token is not written back; the CLI refreshes its own file
+            r = await http.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    **_gemini_oauth(),
+                    "grant_type": "refresh_token",
+                    "refresh_token": c["refresh_token"],
+                },
+                timeout=10,
+            )
+            r.raise_for_status()
+            tok = r.json()["access_token"]
+        h = {"Authorization": f"Bearer {tok}"}
+        r = await http.post(
+            GEMINI_API + "loadCodeAssist", json={"metadata": _GEMINI_META}, headers=h, timeout=10
+        )
+        r.raise_for_status()
+        project = r.json().get("cloudaicompanionProject")
+        if not project:
+            raise QuotaUnavailable("no code assist project")
+        r = await http.post(
+            GEMINI_API + "retrieveUserQuota", json={"project": project}, headers=h, timeout=10
+        )
+        r.raise_for_status()
+        buckets = [
+            b for b in r.json().get("buckets") or [] if b.get("remainingFraction") is not None
+        ]
+    except QuotaUnavailable:
+        raise
+    except Exception as e:  # never include the token / request headers
+        raise QuotaUnavailable(type(e).__name__) from None
+    # ponytail: one DAILY row (WINDOW_CD is 20 chars, model ids don't fit): the tool's model
+    # bucket if set, else the least-used one, so a single exhausted model never blocks the CLI
+    # that falls back to another. Per-model rows if the UI ever needs them.
+    pick = [b for b in buckets if model and b.get("modelId") == model] or buckets
+    if not pick:
+        return []
+    b = max(pick, key=lambda b: b["remainingFraction"])
+    at = from_query_ts(b["resetTime"]) if b.get("resetTime") else None
+    used = round((1 - float(b["remainingFraction"])) * 100, 1)
+    return [_row("GEMINI", "DAILY", used, at, "USAGE_API", datetime.now(UTC))]
 
 
 def collect_codex(sessions_dir: Path) -> list[dict]:
@@ -249,4 +356,20 @@ async def collect_all(
         rows = collect_codex(Path(settings.codex_sessions_dir))
         if rows:
             await apply_quotas(query, ecc, "CODEX", rows, events)
+    for cd, fn, path in (
+        ("GEMINI", collect_gemini, settings.gemini_creds_path),
+        ("CURSOR", collect_cursor, settings.cursor_auth_path),
+    ):
+        t = tools.get(cd) or {}
+        if not t.get("enabled") or t.get("authMode") == "API_KEY":  # API_KEY: BUDGET rows
+            continue
+        try:
+            async with httpx.AsyncClient() as http:
+                args = (t.get("model"),) if cd == "GEMINI" else ()
+                rows = await fn(http, Path(path), *args)
+        except QuotaUnavailable as e:
+            log.warning("%s usage poll failed: %s", cd.lower(), e)
+            continue
+        if rows:
+            await apply_quotas(query, ecc, cd, rows, events)
     return warnings

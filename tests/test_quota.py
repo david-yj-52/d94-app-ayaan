@@ -13,6 +13,8 @@ from ayaan.quota import (
     collect_all,
     collect_claude,
     collect_codex,
+    collect_cursor,
+    collect_gemini,
     expire_past_resets,
     quotas_from_event,
 )
@@ -196,3 +198,100 @@ def test_expired_reset_becomes_unknown():
         {"status": "EXHAUSTED", "resetsAt": "2026-11-11T13:00:00"},
     ]
     assert [r["status"] for r in expire_past_resets(rows, NOW)] == ["UNKNOWN", "EXHAUSTED"]
+
+
+def test_codex_free_plan_30_day_window_is_monthly(tmp_path):
+    ev = {
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {"used_percent": 38.0, "window_minutes": 43200, "resets_at": 1795534778},
+                "secondary": None,
+            },
+        }
+    }
+    (tmp_path / "s.jsonl").write_text(json.dumps(ev))
+    assert [(r["windowCd"], r["usedPct"]) for r in collect_codex(tmp_path)] == [("MONTHLY", 38.0)]
+
+
+async def test_cursor_usage_monthly_row(tmp_path):
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"accessToken": "cur-secret", "refreshToken": "r"}))
+    seen = {}
+
+    def handler(req):
+        seen.update(url=str(req.url), auth=req.headers["authorization"])
+        body = {"billingCycleEnd": "1796243383000", "planUsage": {"totalPercentUsed": 12.5}}
+        return httpx.Response(200, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        [row] = await collect_cursor(http, auth)
+    assert seen["url"].endswith("DashboardService/GetCurrentPeriodUsage")
+    assert seen["auth"] == "Bearer cur-secret"
+    assert (row["toolCd"], row["windowCd"], row["usedPct"]) == ("CURSOR", "MONTHLY", 12.5)
+    assert row["resetsAt"] == "2026-12-02T20:29:43" and row["status"] == "AVAILABLE"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(401))) as h:
+        try:
+            await collect_cursor(h, auth)
+            raise AssertionError
+        except QuotaUnavailable as e:
+            assert "secret" not in str(e)
+
+
+async def test_gemini_refreshes_token_and_picks_bucket(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    monkeypatch.setattr(q, "_gemini_oauth", lambda: {"client_id": "cid", "client_secret": "cs"})
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text(json.dumps({"access_token": "old", "refresh_token": "rt", "expiry_date": 0}))
+    calls = []
+    buckets = [
+        {"modelId": "gemini-pro", "remainingFraction": 0.0, "resetTime": "2026-11-12T08:00:00Z"},
+        {"modelId": "gemini-flash", "remainingFraction": 0.75, "resetTime": "2026-11-12T08:00:00Z"},
+    ]
+
+    def handler(req):
+        calls.append((req.url.path, req.headers.get("authorization")))
+        if req.url.host == "oauth2.googleapis.com":
+            assert b"refresh_token=rt" in req.content
+            return httpx.Response(200, json={"access_token": "new"})
+        if req.url.path.endswith("loadCodeAssist"):
+            return httpx.Response(200, json={"cloudaicompanionProject": "proj-1"})
+        assert json.loads(req.content) == {"project": "proj-1"}
+        return httpx.Response(200, json={"buckets": buckets})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        [row] = await collect_gemini(http, creds)
+        [pro] = await collect_gemini(http, creds, "gemini-pro")
+    assert calls[1] == ("/v1internal:loadCodeAssist", "Bearer new")
+    assert (row["windowCd"], row["usedPct"], row["status"]) == ("DAILY", 25.0, "AVAILABLE")
+    assert row["resetsAt"] == "2026-11-12T08:00:00"
+    assert (pro["usedPct"], pro["status"]) == (100.0, "EXHAUSTED")
+
+
+async def test_collect_all_skips_api_key_and_missing_logins(tmp_path):
+    query = FakeQuery(
+        tools=[
+            {"toolCd": "GEMINI", "enabled": True, "authMode": "ACCOUNT"},
+            {"toolCd": "CURSOR", "enabled": True, "authMode": "API_KEY"},
+        ]
+    )
+    s = Settings(
+        codex_sessions_dir=str(tmp_path),
+        gemini_creds_path=str(tmp_path / "none"),
+        cursor_auth_path=str(tmp_path / "none"),
+    )
+    assert await collect_all(query, FakeEcc(), s, NOW) == []
+    assert query.puts == []
+
+
+def test_gemini_oauth_client_read_from_cli_bundle(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    (tmp_path / "gemini").write_text("")
+    (tmp_path / "chunk-a.js").write_text('var OAUTH_CLIENT_ID = "cid";\nvar x = 1;')
+    (tmp_path / "chunk-b.js").write_text('var OAUTH_CLIENT_SECRET = "cs";')
+    monkeypatch.setattr(q.shutil, "which", lambda n: str(tmp_path / "gemini"))
+    q._gemini_oauth.cache_clear()
+    assert q._gemini_oauth() == {"client_id": "cid", "client_secret": "cs"}
+    q._gemini_oauth.cache_clear()

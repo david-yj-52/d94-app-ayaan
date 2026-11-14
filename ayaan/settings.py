@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     service_name: str = "d94-app-ayaan"
     claude_credentials_path: str = "/home/ayaan/.claude/.credentials.json"
     codex_sessions_dir: str = "/home/ayaan/.codex/sessions"
+    gemini_creds_path: str = "/home/ayaan/.gemini/oauth_creds.json"
+    cursor_auth_path: str = "/home/ayaan/.config/cursor/auth.json"
 
     @property
     def workspace_root_paths(self) -> tuple[Path, ...]:
