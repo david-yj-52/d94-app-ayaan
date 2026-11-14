@@ -138,8 +138,11 @@ def validate_tool(body: dict) -> dict[str, str]:
         except ValueError:
             errs["fallbackResetRule"] = "invalid reset rule"
     ref = body.get("apiKeyRef")
-    if mode == "API_KEY" and not (isinstance(ref, str) and re.fullmatch(r"[A-Z0-9_]+", ref)):
-        errs["apiKeyRef"] = "required for API_KEY, must match ^[A-Z0-9_]+$"
+    # checked in every mode: a pasted key value must never be stored (it is an env var NAME)
+    if (mode == "API_KEY" or ref not in (None, "")) and not (
+        isinstance(ref, str) and re.fullmatch(r"[A-Z][A-Z0-9_]*", ref)
+    ):
+        errs["apiKeyRef"] = "env var name (^[A-Z][A-Z0-9_]*$), required for API_KEY"
     bt = body.get("budgetTokens")
     if bt is not None and (isinstance(bt, bool) or not isinstance(bt, int) or bt < 1):
         errs["budgetTokens"] = "must be an integer >= 1"

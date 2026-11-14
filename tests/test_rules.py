@@ -144,6 +144,9 @@ def test_validate_tool():
     )
     assert set(bad) == {"apiKeyRef", "maxConcurrency", "fallbackResetRule", "budgetTokens"}
     assert "apiKeyRef" in validate_tool({"authMode": "API_KEY"})
+    pasted = "AQ.Ab8_fake-key-value"  # ACCOUNT mode used to accept anything here
+    assert "apiKeyRef" in validate_tool({"authMode": "ACCOUNT", "apiKeyRef": pasted})
+    assert validate_tool({"authMode": "ACCOUNT", "apiKeyRef": None}) == {}
     assert "authMode" in validate_tool({"authMode": "NOPE"})
 
 
