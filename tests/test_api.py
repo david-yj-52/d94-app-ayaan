@@ -95,6 +95,14 @@ def test_create_adhoc_task_gets_adhoc_dir(env):
     assert re.fullmatch(re.escape(str(tmp / ".tasks")) + r"/adhoc-\d{14}", path)
 
 
+def test_create_task_workspace_without_repos_400(env):
+    c, q = env[0], env[1]
+    q.workspaces["CIRA"]["repos"] = []
+    r = c.post(f"{P}/tasks", json={"issueKey": "CIRA-1", "source": "WEB"}, headers=TOKEN)
+    assert r.status_code == 400 and "workspace has no repos" in r.json()["message"]
+    assert q.tasks == {}
+
+
 def test_create_duplicate_issue_409_returns_existing(env):
     c = env[0]
     first = c.post(f"{P}/tasks", json={"issueKey": "CIRA-1", "source": "WEB"}, headers=TOKEN)

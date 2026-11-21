@@ -231,6 +231,8 @@ def create_app(
         ws = await _workspace(project)
         if not ws:
             raise ApiError(400, f"no workspace mapping for project {project}")
+        if not ws.get("repos"):
+            raise ApiError(400, f"workspace has no repos: add repos to {project} (migration)")
         fallback = req.fallbackTools
         if isinstance(fallback, list):
             fallback = ",".join(fallback)

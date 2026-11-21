@@ -64,6 +64,7 @@ class InMemoryQuery:
         self.tasks: dict[str, dict] = {}
         self.runs: dict[str, dict] = {}
         self.workspaces: dict[str, dict] = {}
+        self.task_root = "/ws"  # default parent of add_task workspacePath
         self.issues: dict[str, dict] = {}
         self.plans: dict[str, dict] = {}
         self.milestones: dict[str, list[dict]] = {}  # milestone id -> issues
@@ -100,7 +101,7 @@ class InMemoryQuery:
             "issueKey": None,
             "source": "API",
             "projectKey": "P",
-            "workspacePath": f"/ws/{tid}",
+            "workspacePath": f"{self.task_root}/{tid}",
             "prompt": "do it",
             "toolCd": "CLAUDE",
             "exhaustPolicy": None,

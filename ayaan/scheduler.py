@@ -323,7 +323,7 @@ class Scheduler:
                 )
             try:
                 await self._prepare(task)
-            except git.GitError as e:
+            except (git.GitError, ValueError) as e:
                 return await self._fail(task, f"prepare: {e}", str(e), session, self.clock())
             res, rows = await self._run_once(task, tool, cfg, session)
             retry = res.event.session_missing and res.outcome not in ("COMPLETED", "CANCELLED")
@@ -371,10 +371,12 @@ class Scheduler:
         """One worktree per repo under the task dir, on branch ayaan/<key>. Idempotent."""
         repos = await self._repos(task)
         if not repos:
-            return
+            raise ValueError("workspace has no repos")
         start = None
         if task.get("planId"):
-            plan = await self.query.get_plan(task["planId"])
+            plan = await self.query.get_plan(task["planId"]) or {}
+            if not plan.get("milestoneKey"):
+                raise ValueError(f"plan {task['planId']} has no milestoneKey")
             start = f"origin/ayaan/plan-{plan['milestoneKey']}"
         root, key = self.settings.workspace_root_paths[0], _key(task)
         for r in repos:
@@ -428,8 +430,7 @@ class Scheduler:
         if session:
             argv, prompt = adapter.resume_argv(session, model), RESUME_PROMPT
         else:  # earlier runs without a session to resume: another tool/session left changes
-            repos = await self._repos(task)
-            pre = workspace_preamble(repos, _key(task)) if repos else ""
+            pre = workspace_preamble(await self._repos(task), _key(task))
             argv = adapter.new_argv(model)
             prompt = pre + task["prompt"] + (SWITCH_NOTE if runs else "")
         exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)

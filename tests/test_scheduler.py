@@ -17,6 +17,7 @@ from fakes import (
 
 from ayaan.adapters import ADAPTERS
 from ayaan.clients import to_query_ts
+from ayaan.rules import workspace_preamble
 from ayaan.runner import write_spool
 from ayaan.scheduler import RESUME_PROMPT, SWITCH_NOTE, Scheduler, format_report
 from ayaan.settings import Settings
@@ -25,14 +26,35 @@ NOW = datetime(2026, 11, 11, 3, 0, tzinfo=UTC)  # 12:00 KST
 
 
 @pytest.fixture
-def settings(tmp_path):
+def settings(tmp_path, origin):
     exes = ",".join(f"{t}=/opt/cli/{t}" for t in ("claude", "codex", "gemini", "cursor"))
-    return Settings(_env_file=None, data_dir=str(tmp_path), profile="test", cli_executables=exes)
+    return Settings(
+        _env_file=None,
+        data_dir=str(tmp_path),
+        profile="test",
+        cli_executables=exes,
+        workspace_roots=str(tmp_path / "root"),
+    )
+
+
+async def _until(cond, timeout=10.0):
+    """Waits for a condition; runs now prepare real git worktrees before the runner."""
+    async with asyncio.timeout(timeout):
+        while not cond():
+            await asyncio.sleep(0.01)
 
 
 def _setup(script, settings, ecc=None, gate=None, act=None):
+    """Project P maps to one real repo r1 (conftest `origin`); tasks live under <root>/.tasks."""
     clock = FakeClock(NOW)
     q, ecc = InMemoryQuery.seeded(clock), ecc or FakeEcc()
+    root = settings.workspace_root_paths[0]
+    origin = Path(settings.data_dir) / "origin.git"  # conftest `origin` lives in tmp_path
+    q.workspaces["P"] = {
+        "projectKey": "P",
+        "repos": [{"repoNm": "r1", "gitUrl": str(origin), "baseBranch": "main", "sortOrd": 1}],
+    }
+    q.task_root = str(root / ".tasks")
     runner = fake_runner(script, gate=gate, act=act)
     return q, ecc, clock, runner, Scheduler(q, ecc, settings, clock=clock, runner=runner)
 
@@ -75,7 +97,8 @@ async def test_switch_tool_policy_moves_to_next_available(settings):
     await s.tick()
     await s.drain()
     assert runner2.calls[0].argv_tail == ADAPTERS["CODEX"].new_argv(None)
-    assert runner2.calls[0].prompt == "do it" + SWITCH_NOTE
+    pre = workspace_preamble(q.workspaces["P"]["repos"], tid)
+    assert runner2.calls[0].prompt == pre + "do it" + SWITCH_NOTE
     assert q.task(tid)["status"] == "DONE"
 
 
@@ -152,7 +175,7 @@ async def test_concurrency_respects_max(settings):
     q, ecc, clock, runner, s = _setup([ok_result("a"), ok_result("b")], settings, gate=gate)
     a, b = q.add_task(tool="CLAUDE"), q.add_task(tool="CLAUDE")
     await s.tick()
-    await asyncio.sleep(0.01)
+    await _until(lambda: runner.calls)
     await s.tick()
     await asyncio.sleep(0.01)
     assert len(runner.calls) == 1 and q.task(b)["status"] == "QUEUED"
@@ -257,7 +280,8 @@ async def test_session_missing_retries_new_session_once(settings):
     await s.drain()
     assert runner.calls[0].argv_tail == ADAPTERS["CLAUDE"].resume_argv("gone", None)
     assert runner.calls[1].argv_tail == ADAPTERS["CLAUDE"].new_argv(None)
-    assert runner.calls[1].prompt == "do it" + SWITCH_NOTE
+    pre = workspace_preamble(q.workspaces["P"]["repos"], tid)
+    assert runner.calls[1].prompt == pre + "do it" + SWITCH_NOTE
     t = q.task(tid)
     assert (t["status"], t["cliSessionId"]) == ("DONE", "s2")
 
@@ -375,7 +399,7 @@ async def test_recover_does_not_steal_own_live_task(settings):
     q.tools["CLAUDE"]["maxConcurrency"] = 2
     tid = q.add_task(tool="CLAUDE")
     await s.tick()
-    await asyncio.sleep(0.01)
+    await _until(lambda: runner.calls)
     q.tasks[tid]["leaseUntil"] = to_query_ts(NOW - timedelta(seconds=1))  # query was down
     await s.tick()
     await asyncio.sleep(0.01)
@@ -457,20 +481,10 @@ def test_cli_env_drops_ayaan_vars_but_fake_keeps_scenario(settings, monkeypatch)
 # ── worktree execution ──
 
 
-def _ws_setup(script, tmp_path, origin, act=None, **task):
-    settings = Settings(
-        _env_file=None,
-        data_dir=str(tmp_path / "data"),
-        profile="test",
-        cli_executables="claude=/opt/cli/claude",
-        workspace_roots=str(tmp_path / "root"),
-    )
+def _ws_setup(script, settings, act=None, **task):
     q, ecc, clock, runner, s = _setup(script, settings, act=act)
-    repo = {"repoNm": "r1", "gitUrl": str(origin), "baseBranch": "main", "sortOrd": 1}
-    q.workspaces["P"] = {"projectKey": "P", "repos": [repo]}
-    root = tmp_path / "root"
     tid = q.add_task(
-        tool="CLAUDE", issueKey="TASKS-1", workspacePath=str(root / ".tasks" / "TASKS-1"), **task
+        tool="CLAUDE", issueKey="TASKS-1", workspacePath=f"{q.task_root}/TASKS-1", **task
     )
     return q, ecc, runner, s, tid
 
@@ -479,52 +493,52 @@ def _commit_in_r1(cwd):
     commit(Path(cwd) / "r1", "x.txt", "x\n")
 
 
-async def test_execute_prepares_worktrees_then_runs(tmp_path, origin):
+async def test_execute_prepares_worktrees_then_runs(settings):
     seen = []
 
     def act(cwd):
         seen.append((Path(cwd) / "r1").is_dir())
 
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin, act=act)
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings, act=act)
     await s.tick()
     await s.drain()
     assert seen == [True]
-    assert runner.calls[0].cwd == tmp_path / "root" / ".tasks" / "TASKS-1"
+    assert runner.calls[0].cwd == settings.workspace_root_paths[0] / ".tasks" / "TASKS-1"
     assert git(runner.calls[0].cwd / "r1", "branch", "--show-current") == "ayaan/TASKS-1"
 
 
-async def test_prompt_has_preamble(tmp_path, origin):
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin)
+async def test_prompt_has_preamble(settings, tmp_path, origin):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings)
     await s.tick()
     await s.drain()
     p = runner.calls[0].prompt
     assert p.startswith("[작업 환경]") and "- r1/\n" in p and p.endswith("do it")
 
 
-async def test_resume_prompt_has_no_preamble(tmp_path, origin):
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin, cliSessionId="s0")
+async def test_resume_prompt_has_no_preamble(settings, tmp_path, origin):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings, cliSessionId="s0")
     await s.tick()
     await s.drain()
     assert runner.calls[0].prompt == RESUME_PROMPT
 
 
-async def test_standalone_done_pushes_branch(tmp_path, origin):
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin, act=_commit_in_r1)
+async def test_standalone_done_pushes_branch(settings, tmp_path, origin):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings, act=_commit_in_r1)
     await s.tick()
     await s.drain()
     assert q.task(tid)["status"] == "DONE"
     assert git(origin, "branch", "--list", "ayaan/TASKS-1") != ""
 
 
-async def test_standalone_without_commits_does_not_push(tmp_path, origin):
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin)
+async def test_standalone_without_commits_does_not_push(settings, tmp_path, origin):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings)
     await s.tick()
     await s.drain()
     assert q.task(tid)["status"] == "DONE"
     assert git(origin, "branch", "--list", "ayaan/TASKS-1") == ""
 
 
-async def test_plan_task_starts_from_plan_branch_and_does_not_push(tmp_path, origin, seed):
+async def test_plan_task_starts_from_plan_branch_and_does_not_push(settings, origin, seed):
     git(seed, "checkout", "-q", "-b", "ayaan/plan-M-1")
     commit(seed, "plan.txt", "p\n")
     git(seed, "push", "-q", "origin", "ayaan/plan-M-1")
@@ -534,7 +548,7 @@ async def test_plan_task_starts_from_plan_branch_and_does_not_push(tmp_path, ori
         seen.append((Path(cwd) / "r1" / "plan.txt").exists())
         _commit_in_r1(cwd)
 
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin, act=act)
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings, act=act)
     q.task(tid)["planId"] = q.add_plan(milestoneKey="M-1")
     await s.tick()
     await s.drain()
@@ -542,11 +556,11 @@ async def test_plan_task_starts_from_plan_branch_and_does_not_push(tmp_path, ori
     assert git(origin, "branch", "--list", "ayaan/TASKS-1") == ""  # Task 5 pushes plan tasks
 
 
-async def test_done_with_dirty_worktree_fails(tmp_path, origin):
+async def test_done_with_dirty_worktree_fails(settings, tmp_path, origin):
     def act(cwd):
         (Path(cwd) / "r1" / "loose.txt").write_text("x\n")
 
-    q, ecc, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin, act=act)
+    q, ecc, runner, s, tid = _ws_setup([ok_result("s1")], settings, act=act)
     await s.tick()
     await s.drain()
     t = q.task(tid)
@@ -554,11 +568,31 @@ async def test_done_with_dirty_worktree_fails(tmp_path, origin):
     assert git(origin, "branch", "--list", "ayaan/TASKS-1") == ""
 
 
-async def test_prepare_failure_fails_task(tmp_path, origin):
-    q, _, runner, s, tid = _ws_setup([ok_result("s1")], tmp_path, origin)
+async def test_prepare_failure_fails_task(settings, tmp_path, origin):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings)
     q.workspaces["P"]["repos"][0]["gitUrl"] = str(tmp_path / "missing.git")
     await s.tick()
     await s.drain()
     t = q.task(tid)
     assert t["status"] == "FAILED" and t["failReason"].startswith("prepare: ")
+    assert runner.calls == []
+
+
+async def test_workspace_without_repos_fails_prepare(settings):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings)
+    q.workspaces["P"]["repos"] = []
+    await s.tick()
+    await s.drain()
+    t = q.task(tid)
+    assert t["status"] == "FAILED" and t["failReason"] == "prepare: workspace has no repos"
+    assert runner.calls == []
+
+
+async def test_plan_without_milestone_key_fails_prepare(settings):
+    q, _, runner, s, tid = _ws_setup([ok_result("s1")], settings)
+    q.task(tid)["planId"] = q.add_plan(milestoneKey=None)
+    await s.tick()
+    await s.drain()
+    t = q.task(tid)
+    assert t["status"] == "FAILED" and t["failReason"] == "prepare: plan pl1 has no milestoneKey"
     assert runner.calls == []
