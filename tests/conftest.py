@@ -52,6 +52,6 @@ def repo(origin) -> dict:
 
 
 @pytest.fixture
-def seed(tmp_path) -> Path:
+def seed(tmp_path, origin) -> Path:
     """Working clone of origin, for pushing commits 'from elsewhere' (e.g. onto main)."""
     return tmp_path / "seed"

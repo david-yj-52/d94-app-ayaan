@@ -1,3 +1,6 @@
+import asyncio
+import subprocess
+
 import pytest
 from conftest import commit, git
 
@@ -116,3 +119,39 @@ async def test_delete_branch_missing_ok(tmp_path, repo, origin):
     await g.ensure_branch(tmp_path, repo, "ayaan/plan-M1", "origin/main")
     await g.delete_branch(tmp_path, repo, "ayaan/plan-M1")
     assert "ayaan/plan-M1" not in git(origin, "branch", "--list")
+
+
+async def test_concurrent_merges_same_repo(tmp_path, repo, origin):
+    await _task_on_plan(tmp_path, repo, "AY-1", "a.txt")
+    await _task_on_plan(tmp_path, repo, "AY-2", "b.txt")
+    results = await asyncio.gather(
+        g.merge_no_ff(tmp_path, repo, "ayaan/AY-1", "ayaan/plan-M1"),
+        g.merge_no_ff(tmp_path, repo, "ayaan/AY-2", "ayaan/plan-M1"),
+    )
+    assert results == [True, True]
+    assert git(origin, "rev-list", "--count", "--merges", "ayaan/plan-M1") == "2"
+
+
+async def test_merge_recovers_from_crashed_merge_state(tmp_path, repo, origin, seed):
+    await _task_on_plan(tmp_path, repo, "AY-1", "README.md", "plan\n")
+    await g.merge_no_ff(tmp_path, repo, "ayaan/AY-1", "ayaan/plan-M1")
+    commit(seed, "README.md", "main\n")
+    git(seed, "push", "-q", "origin", "main")
+    d = await g.ensure_clone(tmp_path, repo)
+    git(d, "checkout", "-q", "--detach", "origin/main")
+    with pytest.raises(subprocess.CalledProcessError):  # simulated crash mid-merge
+        git(d, "merge", "--no-ff", "origin/ayaan/plan-M1")
+    assert (d / ".git" / "MERGE_HEAD").exists()
+
+    await _task_on_plan(tmp_path, repo, "AY-2", "b.txt")
+    assert await g.merge_no_ff(tmp_path, repo, "ayaan/AY-2", "ayaan/plan-M1")
+    assert not (d / ".git" / "MERGE_HEAD").exists()
+
+
+async def test_merge_conflict_reports_conflict_and_aborts(tmp_path, repo):
+    await _task_on_plan(tmp_path, repo, "AY-1", "README.md", "one\n")
+    await _task_on_plan(tmp_path, repo, "AY-2", "README.md", "two\n")
+    assert await g.merge_no_ff(tmp_path, repo, "ayaan/AY-1", "ayaan/plan-M1")
+    with pytest.raises(GitError, match="CONFLICT"):  # CONFLICT is on stdout, stderr empty
+        await g.merge_no_ff(tmp_path, repo, "ayaan/AY-2", "ayaan/plan-M1")
+    assert not (g.repo_dir(tmp_path, "r1") / ".git" / "MERGE_HEAD").exists()
