@@ -152,16 +152,23 @@ def validate_tool(body: dict) -> dict[str, str]:
 
 
 def validate_workspace(body: dict, roots: tuple[Path, ...]) -> dict[str, str]:
+    # ponytail: roots unused since task dirs are derived (<root>/.tasks/<key>); kept for callers
     errs: dict[str, str] = {}
-    raw = body.get("workspacePath")
-    if not isinstance(raw, str) or not raw:
-        errs["workspacePath"] = "required"
-    else:
-        p = Path(raw).resolve()
-        if not any(p.is_relative_to(Path(r).resolve()) for r in roots):
-            errs["workspacePath"] = "must be inside an allowed workspace root"
-        elif not p.is_dir():
-            errs["workspacePath"] = "directory does not exist"
+    repos = body.get("repos")
+    if not isinstance(repos, list) or not repos:
+        errs["repos"] = "at least one repo is required"
+    elif not all(
+        isinstance(r, dict)
+        and isinstance(r.get("repoNm"), str)
+        and re.fullmatch(r"[A-Za-z0-9._-]+", r["repoNm"])
+        and r["repoNm"] not in (".", "..")
+        and isinstance(r.get("gitUrl"), str)
+        and r["gitUrl"].strip()
+        for r in repos
+    ):
+        errs["repos"] = "each repo needs repoNm [A-Za-z0-9._-]+ and a non-empty gitUrl"
+    elif len({r["repoNm"] for r in repos}) != len(repos):
+        errs["repos"] = "duplicate repoNm"
     tpl = body.get("promptTemplate")
     if tpl is not None and not isinstance(tpl, str):
         errs["promptTemplate"] = "must be a string"
@@ -176,3 +183,18 @@ def render_prompt(template: str, issue_key: str, title: str, content: str) -> st
     # single pass, no str.format: values are never re-scanned and content may hold braces
     vals = {"{issueKey}": issue_key, "{title}": title, "{content}": content}
     return re.sub(r"\{issueKey\}|\{title\}|\{content\}", lambda m: vals[m[0]], template)
+
+
+def workspace_preamble(repos: list[dict], issue_key: str) -> str:
+    lines = "".join(f"- {r['repoNm']}/\n" for r in repos)
+    return (
+        "[작업 환경]\n"
+        f"이 폴더에는 아래 저장소가 있고, 각 저장소는 브랜치 ayaan/{issue_key} 에 "
+        "체크아웃되어 있습니다.\n"
+        f"{lines}"
+        "[규칙]\n"
+        "- 바꾼 저장소의 빌드와 테스트를 직접 실행해 통과시킨 뒤에만 완료하세요. "
+        "통과하지 못하면 실패로 끝내세요.\n"
+        "- 변경은 커밋까지만 하고 push 하지 마세요.\n"
+        "\n"
+    )

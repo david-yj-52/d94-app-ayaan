@@ -14,10 +14,11 @@ from zoneinfo import ZoneInfo
 import httpx
 from croniter import croniter
 
+from ayaan import git
 from ayaan.adapters import ADAPTERS, RunEvent
 from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
-from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at
+from ayaan.rules import NOTIFY, effective_policy, resolve_resume_at, workspace_preamble
 from ayaan.runner import RunResult, kill_task, pending_spool, run_cli, write_spool
 from ayaan.settings import child_env, resolve_exe
 
@@ -55,6 +56,11 @@ def _label(task: dict) -> str:
         return task["issueKey"]
     first = ((task.get("prompt") or "").strip().splitlines() or [""])[0]
     return first[:40] or task.get("id", "")
+
+
+def _key(task: dict) -> str:
+    """Task dir name = issueKey, or adhoc-<ts> for prompt tasks; also the branch suffix."""
+    return Path(task["workspacePath"]).name
 
 
 def _buttons(task_id: str) -> list[dict]:
@@ -315,6 +321,10 @@ class Scheduler:
                     f"재개: {_label(task)}",
                     f"{_label(task)}\nTool: {cd}\n재개 {n}/{mx}",
                 )
+            try:
+                await self._prepare(task)
+            except git.GitError as e:
+                return await self._fail(task, f"prepare: {e}", str(e), session, self.clock())
             res, rows = await self._run_once(task, tool, cfg, session)
             retry = res.event.session_missing and res.outcome not in ("COMPLETED", "CANCELLED")
             if session and retry:
@@ -352,6 +362,37 @@ class Scheduler:
                 attempt += 1
                 await self.sleep(delay)
 
+    async def _repos(self, task: dict) -> list[dict]:
+        ws = await self.query.get_workspaces() or []
+        w = next((w for w in ws if w.get("projectKey") == task.get("projectKey")), {})
+        return sorted(w.get("repos") or [], key=lambda r: r.get("sortOrd") or 0)
+
+    async def _prepare(self, task: dict) -> None:
+        """One worktree per repo under the task dir, on branch ayaan/<key>. Idempotent."""
+        repos = await self._repos(task)
+        if not repos:
+            return
+        start = None
+        if task.get("planId"):
+            plan = await self.query.get_plan(task["planId"])
+            start = f"origin/ayaan/plan-{plan['milestoneKey']}"
+        root, key = self.settings.workspace_root_paths[0], _key(task)
+        for r in repos:
+            await git.add_worktree(root, r, key, start or f"origin/{r['baseBranch']}")
+
+    async def _push_standalone(self, task: dict, repos: list[dict]) -> list[str]:
+        """Push ayaan/<key> of every repo with commits; returns repos whose push failed."""
+        failed = []
+        for r in repos:
+            path = Path(task["workspacePath"]) / r["repoNm"]
+            try:
+                if await git.has_commits(path, f"origin/{r['baseBranch']}"):
+                    await git.push_branch(path, f"ayaan/{_key(task)}")
+            except git.GitError:
+                log.warning("push of %s failed for %s", r["repoNm"], task["id"], exc_info=True)
+                failed.append(r["repoNm"])
+        return failed
+
     def _env(self, tool: dict) -> dict:
         # ponytail: AYAAN_* never reach the CLI (residual risk and upgrade path: see child_env)
         fake = FAKE_ENV if tool["toolCd"] == "FAKE" else ()  # non-secret FAKE scenario inputs
@@ -387,7 +428,10 @@ class Scheduler:
         if session:
             argv, prompt = adapter.resume_argv(session, model), RESUME_PROMPT
         else:  # earlier runs without a session to resume: another tool/session left changes
-            argv, prompt = adapter.new_argv(model), task["prompt"] + (SWITCH_NOTE if runs else "")
+            repos = await self._repos(task)
+            pre = workspace_preamble(repos, _key(task)) if repos else ""
+            argv = adapter.new_argv(model)
+            prompt = pre + task["prompt"] + (SWITCH_NOTE if runs else "")
         exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)
         data_dir = Path(self.settings.data_dir)
         log_path = data_dir / "logs" / tid / f"{seq}.log"
@@ -467,6 +511,11 @@ class Scheduler:
         if res.outcome == "CANCELLED":
             return  # the API already moved the task; only the run record is finished
         if res.outcome == "COMPLETED":
+            repos = await self._repos(task)
+            for r in repos:
+                if await git.dirty(Path(task["workspacePath"]) / r["repoNm"]):
+                    reason = f"uncommitted changes in {r['repoNm']}"
+                    return await self._fail(task, reason, reason, sid, now)
             t = await self.query.transition(
                 tid,
                 "RUNNING",
@@ -476,13 +525,14 @@ class Scheduler:
                 finishedAt=to_query_ts(now),
             )
             if t:
+                # plan tasks are pushed and merged by the plan pipeline
+                failed = [] if task.get("planId") else await self._push_standalone(task, repos)
                 detail = await self.query.get_task(tid) or {}
                 started = from_query_ts(t["startedAt"]) if t.get("startedAt") else now
-                await self._notify(
-                    "DONE",
-                    f"완료: {_label(t)}",
-                    format_done(t, detail.get("tokenTotals") or {}, now - started),
-                )
+                body = format_done(t, detail.get("tokenTotals") or {}, now - started)
+                if failed:
+                    body += f"\npush 실패: {', '.join(failed)}"
+                await self._notify("DONE", f"완료: {_label(t)}", body)
         elif res.outcome == "LIMIT_HIT":
             await self._on_limit(task, cfg, ev, rows, sid, now)
         else:

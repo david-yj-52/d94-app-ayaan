@@ -1,4 +1,5 @@
 import base64
+import re
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -37,7 +38,7 @@ def env(tmp_path):
     q, ecc = InMemoryQuery.seeded(), FakeEcc()
     q.workspaces["CIRA"] = {
         "projectKey": "CIRA",
-        "workspacePath": str(tmp_path / "ws"),
+        "repos": [{"repoNm": "r1", "gitUrl": "git@x:r1.git", "baseBranch": "main"}],
         "defaultTool": "CLAUDE",
         "promptTemplate": "{issueKey} {title}\n{content}",
     }
@@ -77,13 +78,21 @@ def test_empty_api_token_rejects_empty_header(env):
 
 
 def test_create_by_issue_key_renders_prompt(env):
-    c, q = env[0], env[1]
+    c, q, tmp = env[0], env[1], env[5]
     r = c.post(f"{P}/tasks", json={"issueKey": "CIRA-1", "source": "WEB"}, headers=TOKEN)
     assert r.status_code == 201
     t = r.json()["data"]
     assert t["prompt"] == "CIRA-1 Fix\nkeep {x} literal"
     assert t["status"] == "QUEUED" and t["toolCd"] == "CLAUDE" and t["id"] in q.tasks
-    assert t["workspacePath"] == q.workspaces["CIRA"]["workspacePath"]
+    assert t["workspacePath"] == str(tmp / ".tasks" / "CIRA-1")
+
+
+def test_create_adhoc_task_gets_adhoc_dir(env):
+    c, tmp = env[0], env[5]
+    r = c.post(f"{P}/tasks", json={"prompt": "hi", "projectKey": "CIRA"}, headers=TOKEN)
+    assert r.status_code == 201
+    path = r.json()["data"]["workspacePath"]
+    assert re.fullmatch(re.escape(str(tmp / ".tasks")) + r"/adhoc-\d{14}", path)
 
 
 def test_create_duplicate_issue_409_returns_existing(env):
@@ -141,15 +150,16 @@ def test_put_config_invalid_422_with_field_errors(env):
 
 
 def test_put_tool_and_workspace_validation(env):
-    c, q, tmp = env[0], env[1], env[5]
+    c, q = env[0], env[1]
     r = c.put(f"{P}/tools/CLAUDE", json={"maxConcurrency": 9}, headers=TOKEN)
     assert r.status_code == 422 and "maxConcurrency" in r.json()["data"]
     r = c.put(f"{P}/tools/CLAUDE", json={"maxConcurrency": 2}, headers=TOKEN)
     assert r.status_code == 200 and q.tools["CLAUDE"]["maxConcurrency"] == 2
-    bad = {"workspacePath": "/etc", "defaultTool": "CLAUDE"}
+    bad = {"defaultTool": "CLAUDE"}
     r = c.put(f"{P}/workspaces/D94", json=bad, headers=TOKEN)
-    assert r.status_code == 422 and "workspacePath" in r.json()["data"]
-    ok = {"workspacePath": str(tmp / "ws"), "defaultTool": "CLAUDE", "promptTemplate": None}
+    assert r.status_code == 422 and "repos" in r.json()["data"]
+    repos = [{"repoNm": "r1", "gitUrl": "git@x:r1.git", "baseBranch": "main"}]
+    ok = {"repos": repos, "defaultTool": "CLAUDE", "promptTemplate": None}
     assert c.put(f"{P}/workspaces/D94", json=ok, headers=TOKEN).status_code == 200
     assert c.delete(f"{P}/workspaces/D94", headers=TOKEN).status_code == 200
     assert "D94" not in q.workspaces
@@ -202,13 +212,13 @@ def test_quotas_include_scheduler_warnings(env):
 
 
 def test_issue_preview(env):
-    c, q = env[0], env[1]
+    c, tmp = env[0], env[5]
     d = c.get(f"{P}/issues/CIRA-1", headers=TOKEN).json()["data"]
     assert d == {
         "issueKey": "CIRA-1",
         "title": "Fix",
         "projectKey": "CIRA",
-        "workspacePath": q.workspaces["CIRA"]["workspacePath"],
+        "workspacePath": str(tmp / ".tasks" / "CIRA-1"),
         "defaultTool": "CLAUDE",
     }
     assert c.get(f"{P}/issues/NOPE-1", headers=TOKEN).status_code == 404

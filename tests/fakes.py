@@ -343,12 +343,15 @@ class FakeEcc:
         return [s[0] for s in self.sent]
 
 
-def fake_runner(script: list[RunResult], gate=None):
-    """Returns queued results in order; records kwargs in .calls. Optional asyncio.Event gate."""
+def fake_runner(script: list[RunResult], gate=None, act=None):
+    """Returns queued results in order; records kwargs in .calls. Optional asyncio.Event gate.
+    Optional act(cwd: Path) runs first, e.g. to edit and commit files in the worktrees."""
     script = list(script)
 
     async def run(**kw):
         run.calls.append(SimpleNamespace(**kw))
+        if act is not None:
+            act(kw["cwd"])
         if gate is not None:
             await gate.wait()
         return copy.deepcopy(script.pop(0))

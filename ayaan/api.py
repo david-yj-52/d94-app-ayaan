@@ -7,6 +7,7 @@ import logging
 import secrets
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from ayaan import plugins
 from ayaan.clients import EccClient, QueryClient, to_query_ts
+from ayaan.git import task_dir
 from ayaan.quota import collect_all
 from ayaan.rules import (
     POLICIES,
@@ -204,6 +206,10 @@ def create_app(
         ws = await query.get_workspaces() or []
         return next((w for w in ws if w.get("projectKey") == project_key), None)
 
+    def _task_path(issue_key: str | None) -> str:
+        key = issue_key or f"adhoc-{datetime.now(UTC):%Y%m%d%H%M%S}"
+        return str(task_dir(settings.workspace_root_paths[0], key))
+
     # ── tasks ──
     @r.post("/tasks", status_code=201)
     async def create_task(req: TaskReq):
@@ -250,7 +256,7 @@ def create_app(
                 "issueKey": req.issueKey,
                 "source": req.source,
                 "projectKey": project,
-                "workspacePath": ws["workspacePath"],
+                "workspacePath": _task_path(req.issueKey),
                 "prompt": prompt,
                 "toolCd": cd,
                 "exhaustPolicy": req.exhaustPolicy,
@@ -340,7 +346,6 @@ def create_app(
     @r.put("/workspaces/{key}")
     async def put_workspace(key: str, body: dict[str, Any] = Body(...)):
         _invalid(validate_workspace(body, settings.workspace_root_paths))
-        body["workspacePath"] = str(Path(body["workspacePath"]).resolve())
         body.pop("projectKey", None)
         return ok(await query.put_workspace(key, body))
 
@@ -360,7 +365,7 @@ def create_app(
                 "issueKey": issue["issueKey"],
                 "title": issue.get("title"),
                 "projectKey": issue.get("projectKey"),
-                "workspacePath": ws["workspacePath"],
+                "workspacePath": _task_path(issue["issueKey"]),
                 "defaultTool": ws.get("defaultTool"),
             }
         )

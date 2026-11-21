@@ -10,6 +10,7 @@ from ayaan.rules import (
     validate_config,
     validate_tool,
     validate_workspace,
+    workspace_preamble,
 )
 
 NOW = datetime(2026, 11, 10, 1, 0, tzinfo=UTC)  # = 2026-11-09 17:00 America/Los_Angeles
@@ -150,22 +151,48 @@ def test_validate_tool():
     assert "authMode" in validate_tool({"authMode": "NOPE"})
 
 
-def test_workspace_outside_root_rejected(tmp_path):
-    root = tmp_path / "root"
-    (root / "proj").mkdir(parents=True)
-    (tmp_path / "other").mkdir()
-    roots = (root,)
-    assert validate_workspace({"workspacePath": str(root / "proj")}, roots) == {}
-    assert "workspacePath" in validate_workspace({"workspacePath": str(tmp_path / "other")}, roots)
-    assert "workspacePath" in validate_workspace(
-        {"workspacePath": str(root / "proj" / ".." / ".." / "other")}, roots
+REPO = {"repoNm": "r1", "gitUrl": "git@x:r1.git", "baseBranch": "main"}
+
+
+def test_validate_workspace_requires_repos(tmp_path):
+    roots = (tmp_path,)
+    assert "repos" in validate_workspace({"defaultTool": "CLAUDE"}, roots)
+    assert "repos" in validate_workspace({"repos": []}, roots)
+    assert validate_workspace({"repos": [REPO]}, roots) == {}
+    # workspacePath is no longer validated (derived per task)
+    assert validate_workspace({"repos": [REPO], "workspacePath": "/etc"}, roots) == {}
+
+
+def test_validate_workspace_repo_fields_and_duplicates(tmp_path):
+    roots = (tmp_path,)
+    assert "repos" in validate_workspace({"repos": [{**REPO, "repoNm": "a/b"}]}, roots)
+    assert "repos" in validate_workspace({"repos": [{**REPO, "repoNm": ".."}]}, roots)
+    assert "repos" in validate_workspace({"repos": [{**REPO, "gitUrl": ""}]}, roots)
+    assert "repos" in validate_workspace({"repos": ["r1"]}, roots)
+
+
+def test_validate_workspace_duplicate_repo(tmp_path):
+    assert "repos" in validate_workspace({"repos": [REPO, dict(REPO)]}, (tmp_path,))
+
+
+def test_workspace_preamble_exact_text():
+    repos = [{"repoNm": "a"}, {"repoNm": "b"}]
+    assert workspace_preamble(repos, "CIRA-1") == (
+        "[작업 환경]\n"
+        "이 폴더에는 아래 저장소가 있고, "
+        "각 저장소는 브랜치 ayaan/CIRA-1 에 체크아웃되어 있습니다.\n"
+        "- a/\n"
+        "- b/\n"
+        "[규칙]\n"
+        "- 바꾼 저장소의 빌드와 테스트를 직접 실행해 통과시킨 뒤에만 완료하세요. "
+        "통과하지 못하면 실패로 끝내세요.\n"
+        "- 변경은 커밋까지만 하고 push 하지 마세요.\n"
+        "\n"
     )
-    assert "workspacePath" in validate_workspace({"workspacePath": str(root / "missing")}, roots)
 
 
 def test_workspace_prompt_template_placeholders(tmp_path):
-    (tmp_path / "p").mkdir()
-    body = {"workspacePath": str(tmp_path / "p"), "promptTemplate": "{issueKey} {title} {content}"}
+    body = {"repos": [REPO], "promptTemplate": "{issueKey} {title} {content}"}
     assert validate_workspace(body, (tmp_path,)) == {}
     body["promptTemplate"] = "{issueKey} {other}"
     assert "promptTemplate" in validate_workspace(body, (tmp_path,))
@@ -185,8 +212,7 @@ def test_tool_blank_reset_rule_is_unset_and_budget_period_enum():
 
 
 def test_workspace_non_string_template_and_default_tool(tmp_path):
-    (tmp_path / "p").mkdir()
-    body = {"workspacePath": str(tmp_path / "p"), "promptTemplate": 5}
+    body = {"repos": [REPO], "promptTemplate": 5}
     assert set(validate_workspace(body, (tmp_path,))) == {"promptTemplate"}
-    body = {"workspacePath": str(tmp_path / "p"), "defaultTool": "NOPE"}
+    body = {"repos": [REPO], "defaultTool": "NOPE"}
     assert set(validate_workspace(body, (tmp_path,))) == {"defaultTool"}
