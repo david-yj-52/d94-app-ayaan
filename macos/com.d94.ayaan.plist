@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ayaan on the MacBook. Install: cp to ~/Library/LaunchAgents, launchctl bootstrap gui/$(id -u) <plist>.
+     .env and data live in ~/.ayaan (WorkingDirectory). caffeinate -i: no idle sleep while ayaan runs. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.d94.ayaan</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/davidkim/Workspace/tsh/david94/app/d94-app-ayaan/.venv/bin/uvicorn</string>
+        <string>ayaan.api:app</string>
+        <string>--host</string><string>0.0.0.0</string>
+        <string>--port</string><string>8086</string>
+        <!-- export .env into os.environ like compose env_file: API keys are read by apiKeyRef -->
+        <string>--env-file</string><string>/Users/davidkim/.ayaan/.env</string>
+    </array>
+    <key>WorkingDirectory</key><string>/Users/davidkim/.ayaan</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/davidkim/.nvm/versions/node/v26.13.0/bin:/Users/davidkim/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>/Users/davidkim/.ayaan/data/logs/launchd.log</string>
+    <key>StandardErrorPath</key><string>/Users/davidkim/.ayaan/data/logs/launchd.log</string>
+</dict>
+</plist>

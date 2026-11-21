@@ -15,6 +15,8 @@ cp .env.example .env   # fill in tokens
 
 `AYAAN_PROFILE=test` enables the `FAKE` tool (no real CLI calls). Deployment: `docker compose up -d` (see `docker-compose.yml`).
 
+Production runs on the MacBook since 2026-11-20 as LaunchAgent `macos/com.d94.ayaan.plist` (`.env` and data in `~/.ayaan`, registers in delap Eureka with the Mac IP). Runbook: `d94-note/process/deploy/ayaan.md` "MacBook 실행".
+
 ## Environment (`AYAAN_` prefix)
 
 | Variable | Purpose |

@@ -295,3 +295,31 @@ def test_gemini_oauth_client_read_from_cli_bundle(tmp_path, monkeypatch):
     q._gemini_oauth.cache_clear()
     assert q._gemini_oauth() == {"client_id": "cid", "client_secret": "cs"}
     q._gemini_oauth.cache_clear()
+
+
+def test_cursor_token_falls_back_to_keychain(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    monkeypatch.setattr(q, "cursor_keychain_token", lambda: "kc-cur")
+    assert q._cursor_token(tmp_path / "missing.json") == "kc-cur"
+    monkeypatch.setattr(q, "cursor_keychain_token", lambda: None)
+    try:
+        q._cursor_token(tmp_path / "missing.json")
+        raise AssertionError
+    except QuotaUnavailable:
+        pass
+
+
+def test_claude_token_falls_back_to_keychain(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    monkeypatch.setattr(
+        q, "claude_keychain_credentials", lambda: '{"claudeAiOauth": {"accessToken": "kc"}}'
+    )
+    assert q._token(tmp_path / "missing.json") == "kc"
+    monkeypatch.setattr(q, "claude_keychain_credentials", lambda: None)
+    try:
+        q._token(tmp_path / "missing.json")
+        raise AssertionError
+    except QuotaUnavailable:
+        pass

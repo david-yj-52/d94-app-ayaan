@@ -15,7 +15,7 @@ import httpx
 from ayaan.adapters import RunEvent
 from ayaan.clients import EccClient, QueryClient, from_query_ts, to_query_ts
 from ayaan.rules import resolve_resume_at
-from ayaan.settings import Settings
+from ayaan.settings import Settings, claude_keychain_credentials, cursor_keychain_token
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +71,10 @@ def _window_from_minutes(minutes) -> str | None:
 
 
 def _token(path: Path) -> str:
-    data = json.loads(path.read_text())
+    raw = path.read_text() if path.is_file() else claude_keychain_credentials()
+    if not raw:
+        raise QuotaUnavailable("no credentials")
+    data = json.loads(raw)
     tok = (data.get("claudeAiOauth") or data).get("accessToken")
     if not tok:
         raise QuotaUnavailable("no access token")
@@ -104,10 +107,24 @@ async def collect_claude(http: httpx.AsyncClient, credentials_path: Path) -> lis
     return rows
 
 
+def _cursor_token(path: Path) -> str:
+    if path.is_file():
+        try:
+            tok = json.loads(path.read_text()).get("accessToken")
+            if tok:
+                return tok
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    tok = cursor_keychain_token()
+    if tok:
+        return tok
+    raise QuotaUnavailable("no credentials")
+
+
 async def collect_cursor(http: httpx.AsyncClient, auth_path: Path) -> list[dict]:
     """Cursor dashboard usage with the agent CLI's own token (unofficial, same as the IDE)."""
     try:
-        tok = json.loads(Path(auth_path).read_text())["accessToken"]
+        tok = _cursor_token(Path(auth_path))
         resp = await http.post(
             CURSOR_USAGE_URL,
             headers={

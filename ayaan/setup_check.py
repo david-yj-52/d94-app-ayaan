@@ -9,7 +9,13 @@ import httpx
 
 from ayaan.adapters import TESTED_VERSIONS
 from ayaan.scheduler import EXE_MISSING
-from ayaan.settings import Settings, child_env, resolve_exe
+from ayaan.settings import (
+    Settings,
+    child_env,
+    claude_keychain_credentials,
+    cursor_keychain_token,
+    resolve_exe,
+)
 
 TIMEOUT_S = 10
 # credential files written by each CLI's login, relative to HOME
@@ -101,7 +107,11 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
     step1 = list(await asyncio.gather(*(_version(cd, exe) for cd, exe in exes.items())))
     for t in cli:
         if t.get("authMode") != "API_KEY":
-            found = any((Path.home() / f).is_file() for f in LOGIN_FILES[t["toolCd"]])
+            found = (
+                any((Path.home() / f).is_file() for f in LOGIN_FILES[t["toolCd"]])
+                or (t["toolCd"] == "CLAUDE" and claude_keychain_credentials() is not None)
+                or (t["toolCd"] == "CURSOR" and cursor_keychain_token() is not None)
+            )
             step1.append(
                 _item(f"{t['toolCd']} login", found, "logged in" if found else "not logged in")
             )

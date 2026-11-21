@@ -1,5 +1,7 @@
 import os
 import shutil
+import subprocess
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -79,3 +81,28 @@ def resolve_exe(name: str, settings: Settings) -> str | None:
     key = name.lower()
     found = settings.executable_map.get(key) or shutil.which(DEFAULT_EXE.get(key, key))
     return found if found and os.path.isabs(found) else None
+
+
+def claude_keychain_credentials() -> str | None:
+    """macOS claude stores its login in the Keychain, not ~/.claude/.credentials.json."""
+    return _keychain_password("Claude Code-credentials")
+
+
+def _keychain_password(service: str) -> str | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return (r.stdout.strip() or None) if r.returncode == 0 else None
+
+
+def cursor_keychain_token() -> str | None:
+    """macOS agent login stores the access token in the Keychain, not auth.json."""
+    return _keychain_password("cursor-access-token")
