@@ -131,7 +131,7 @@ class InMemoryQuery:
             "projectKey": "P",
             "milestoneId": "m1",
             "milestoneKey": "M-1",
-            "stage": "PLANNING",
+            "stage": "PREPARING",
             "currentIssueKey": None,
             "lastError": None,
             "startedAt": to_query_ts(self.clock()),
@@ -312,7 +312,9 @@ class InMemoryQuery:
         return dict(p)
 
     async def milestone_issues(self, milestone_id):
-        return [dict(i) for i in self.milestones.get(milestone_id, [])]
+        return sorted(
+            (dict(i) for i in self.milestones.get(milestone_id, [])), key=lambda i: i["issueNo"]
+        )
 
     async def project_milestones(self, project_key):
         return [dict(m) for m in self.project_milestone_list.get(project_key, [])]
