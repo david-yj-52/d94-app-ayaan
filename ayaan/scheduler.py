@@ -264,7 +264,9 @@ class Scheduler:
                 "baseBranch": head.removeprefix("origin/"),
                 "sortOrd": 0,
             }
-            await self.query.put_workspace(w["projectKey"], {"repos": [repo]})
+            # PUT replaces promptTemplate/defaultTool (null clears): resend the existing values
+            body = {k: w.get(k) for k in ("workspacePath", "defaultTool", "promptTemplate")}
+            await self.query.put_workspace(w["projectKey"], {**body, "repos": [repo]})
 
     async def send_report(self) -> None:
         tasks = await self.query.list_tasks() or []

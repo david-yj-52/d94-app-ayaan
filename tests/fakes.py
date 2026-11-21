@@ -167,6 +167,8 @@ class InMemoryQuery:
         body = {
             k: v for k, v in body.items() if not (k == "repos" and v is None)
         }  # null = untouched
+        # d94-query PUT replaces promptTemplate: absent/null clears it
+        body = {"promptTemplate": None, **body}
         self.workspaces[key] = {**self.workspaces.get(key, {}), **body, "projectKey": key}
         return dict(self.workspaces[key])
 

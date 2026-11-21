@@ -243,7 +243,12 @@ async def test_migrate_workspace_creates_repo_row(tmp_path, origin):
     clone = tmp_path / "myrepo"
     git(tmp_path, "clone", "-q", str(origin), str(clone))
     q = InMemoryQuery.seeded(FakeClock(NOW))
-    q.workspaces["P"] = {"projectKey": "P", "workspacePath": str(clone)}
+    q.workspaces["P"] = {
+        "projectKey": "P",
+        "workspacePath": str(clone),
+        "defaultTool": "CODEX",
+        "promptTemplate": "custom {issueKey}",
+    }
     q.workspaces["Q"] = {"projectKey": "Q", "workspacePath": str(tmp_path / "gone")}
     settings = Settings(_env_file=None, data_dir=str(tmp_path), workspace_roots=str(tmp_path))
     s = Scheduler(q, FakeEcc(), settings, clock=q.clock)
@@ -253,3 +258,16 @@ async def test_migrate_workspace_creates_repo_row(tmp_path, origin):
         {"repoNm": "myrepo", "gitUrl": str(origin), "baseBranch": "main", "sortOrd": 0}
     ]
     assert not q.workspaces["Q"].get("repos")
+    p = q.workspaces["P"]
+    assert (p["promptTemplate"], p["defaultTool"], p["workspacePath"]) == (
+        "custom {issueKey}",
+        "CODEX",
+        str(clone),
+    )
+
+
+async def test_gc_removes_never_pushed_worktree_without_commits(tmp_path):
+    q, _, s, _, origins, _ = _setup(tmp_path, [])
+    d = await _wt(q, s, origins, "TASKS-1", "DONE")  # no upstream, nothing beyond origin/main
+    assert await plans.gc_worktrees(s) == []
+    assert not d.exists()
