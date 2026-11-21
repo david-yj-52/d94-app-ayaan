@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from croniter import croniter
 
-from ayaan import git
+from ayaan import git, plans
 from ayaan.adapters import ADAPTERS, RunEvent
 from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.quota import _WINDOW_KO, apply_quotas, budget_quota, collect_all, quotas_from_event
@@ -270,6 +270,10 @@ class Scheduler:
         await self._recover()
         cfg = await self._config()
         now, grace = self.clock(), _int(cfg, "RESUME_GRACE_SEC", 120)
+        try:  # before claiming, so a task a plan just queued starts this tick
+            await plans.advance_plans(self)
+        except Exception:
+            log.exception("advance_plans failed")
         quotas = await self.query.get_quotas() or []
         for tool in await self.query.get_tools() or []:
             cd = tool["toolCd"]

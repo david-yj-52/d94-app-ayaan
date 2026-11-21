@@ -190,6 +190,15 @@ async def changed_since(root: Path, repo: dict, ref: str) -> bool:
     return int(await _git(d, "rev-list", "--count", f"{ref}..origin/{repo['baseBranch']}")) > 0
 
 
+async def merged_since(root: Path, repo: dict, plan_branch: str, since: str) -> bool:
+    """True if origin/<base> holds a `Merge ... into <plan_branch>` commit missing from
+    origin/<since>. Merge messages survive `rebase --rebase-merges`, so this is how a repo
+    "changed by the plan" is told apart from foreign commits on base, with no stored state."""
+    d = await ensure_clone(root, repo)
+    rng = f"origin/{since}..origin/{repo['baseBranch']}"
+    return int(await _git(d, "rev-list", "--count", f"--grep=into {plan_branch}$", rng)) > 0
+
+
 async def delete_branch(root: Path, repo: dict, branch: str) -> None:
     d = repo_dir(root, repo["repoNm"])
     async with _lock(d):

@@ -18,7 +18,8 @@ SEED_CONFIG = {
     "QUOTA_POLL_INTERVAL_SEC": "300",
     "CLAUDE_USAGE_POLL": "true",
     "REPORT_CRON": "0 9,18 * * *",
-    "NOTIFY_EVENTS": "PAUSED,RESUMED,DONE,FAILED,QUOTA_EXHAUSTED,QUOTA_RESTORED",
+    "NOTIFY_EVENTS": "PAUSED,RESUMED,DONE,FAILED,QUOTA_EXHAUSTED,QUOTA_RESTORED,"
+    "PLAN_STARTED,PLAN_HALTED,PLAN_DEPLOYED",
     "DEFAULT_PROJECT_KEY": "",
 }
 SEED_RULES = {
@@ -313,9 +314,11 @@ class InMemoryQuery:
         return dict(p)
 
     async def milestone_issues(self, milestone_id):
-        return sorted(
-            (dict(i) for i in self.milestones.get(milestone_id, [])), key=lambda i: i["issueNo"]
-        )
+        rows = [dict(i) for i in self.milestones.get(milestone_id, [])]
+        for i in rows:  # issue_done moves the CIRA issue to a DONE-category status
+            if i["issueKey"] in self.done_issues:
+                i["statusCategory"] = "DONE"
+        return sorted(rows, key=lambda i: i["issueNo"])
 
     async def project_milestones(self, project_key):
         return [dict(m) for m in self.project_milestone_list.get(project_key, [])]

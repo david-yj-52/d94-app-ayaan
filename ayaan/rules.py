@@ -8,7 +8,23 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 TOOLS = {"CLAUDE", "CODEX", "GEMINI", "CURSOR", "FAKE"}
-NOTIFY = {"PAUSED", "RESUMED", "DONE", "FAILED", "QUOTA_EXHAUSTED", "QUOTA_RESTORED"}
+NOTIFY = {
+    "PAUSED",
+    "RESUMED",
+    "DONE",
+    "FAILED",
+    "QUOTA_EXHAUSTED",
+    "QUOTA_RESTORED",
+    "PLAN_STARTED",
+    "PLAN_HALTED",
+    "PLAN_DEPLOYED",
+}
+DEFAULT_TEMPLATE = (
+    "CIRA 이슈 {issueKey}: {title}\n\n{content}\n\n"
+    "위 이슈를 구현하고 테스트·빌드를 통과시킨 뒤, "
+    "저장소 규칙(CLAUDE.md/AGENTS.md)에 따라 커밋·배포까지 진행해.\n"
+    "완료되면 마지막 줄에 'AYAAN_RESULT: <한 줄 요약>'을 출력해."
+)
 POLICIES = {"WAIT_SAME_TOOL", "SWITCH_TOOL"}
 
 _INT_RANGES = {

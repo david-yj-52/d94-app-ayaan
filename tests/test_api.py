@@ -388,3 +388,60 @@ def test_gemini_login_detected_by_either_credential_file(tmp_path, monkeypatch):
     (tmp_path / ".gemini" / "gemini-credentials.json").write_text("{}")
     files = setup_check.LOGIN_FILES["GEMINI"]
     assert any((tmp_path / f).is_file() for f in files)
+
+
+# ── plans ──
+
+
+def _plan_env(env):
+    c, q = env[0], env[1]
+    q.project_milestone_list["CIRA"] = [{"id": "m1", "name": "Sprint 1!"}]
+    q.milestones["m1"] = [
+        {"issueKey": f"CIRA-{n}", "issueNo": n, "issueTypeNm": "Task", "statusCategory": "TODO"}
+        for n in (1, 2, 3)
+    ]
+    return c, q
+
+
+def test_create_plan_and_second_plan_same_project_409(env):
+    c, q = _plan_env(env)
+    r = c.post(f"{P}/plans", json={"projectKey": "CIRA", "milestoneId": "m1"}, headers=TOKEN)
+    assert r.status_code == 201
+    d = r.json()["data"]
+    assert d["milestoneKey"] == "sprint-1" and d["stage"] == "PREPARING"
+    r = c.post(f"{P}/plans", json={"projectKey": "CIRA", "milestoneId": "m1"}, headers=TOKEN)
+    assert r.status_code == 409
+
+
+def test_create_plan_rejects_unknown_milestone_and_unmapped_project(env):
+    c, _ = _plan_env(env)
+    r = c.post(f"{P}/plans", json={"projectKey": "CIRA", "milestoneId": "zz"}, headers=TOKEN)
+    assert r.status_code == 404
+    r = c.post(f"{P}/plans", json={"projectKey": "NOPE", "milestoneId": "m1"}, headers=TOKEN)
+    assert r.status_code == 400
+
+
+def test_list_plans_progress_counts(env):
+    c, q = _plan_env(env)
+    pid = q.add_plan(projectKey="CIRA", stage="RUNNING")
+    q.add_task(issueKey="CIRA-1", projectKey="CIRA", planId=pid, status="DONE")
+    q.done_issues.append("CIRA-1")
+    r = c.get(f"{P}/plans", params={"projectKey": "CIRA"}, headers=TOKEN)
+    p = r.json()["data"][0]
+    assert (p["id"], p["done"], p["total"]) == (pid, 1, 3)
+
+
+def test_plan_resume_and_cancel(env):
+    c, q = _plan_env(env)
+    pid = q.add_plan(projectKey="CIRA", stage="HALTED", lastError="DEPLOYING: push rejected")
+    assert c.post(f"{P}/plans/{pid}/resume", headers=TOKEN).json()["data"]["stage"] == "DEPLOYING"
+    assert c.post(f"{P}/plans/{pid}/resume", headers=TOKEN).status_code == 409
+    r = c.post(f"{P}/plans/{pid}/cancel", headers=TOKEN)
+    assert r.status_code == 200 and r.json()["data"]["stage"] == "CANCELLED"
+    assert c.post(f"{P}/plans/{pid}/cancel", headers=TOKEN).status_code == 409
+
+
+def test_project_milestones(env):
+    c, _ = _plan_env(env)
+    r = c.get(f"{P}/projects/CIRA/milestones", headers=TOKEN)
+    assert r.json()["data"] == [{"id": "m1", "name": "Sprint 1!"}]

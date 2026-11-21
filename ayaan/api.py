@@ -18,11 +18,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from ayaan import plugins
+from ayaan import plans, plugins
 from ayaan.clients import EccClient, QueryClient, to_query_ts
-from ayaan.git import task_dir
+from ayaan.git import slug, task_dir
 from ayaan.quota import collect_all
 from ayaan.rules import (
+    DEFAULT_TEMPLATE,
     POLICIES,
     TOOLS,
     render_prompt,
@@ -39,12 +40,6 @@ log = logging.getLogger(__name__)
 
 PREFIX = "/tsh/api/v1/ayaan"
 SOURCES = {"TELEGRAM", "API", "WEB", "CIRA"}
-DEFAULT_TEMPLATE = (
-    "CIRA 이슈 {issueKey}: {title}\n\n{content}\n\n"
-    "위 이슈를 구현하고 테스트·빌드를 통과시킨 뒤, "
-    "저장소 규칙(CLAUDE.md/AGENTS.md)에 따라 커밋·배포까지 진행해.\n"
-    "완료되면 마지막 줄에 'AYAAN_RESULT: <한 줄 요약>'을 출력해."
-)
 
 
 class ApiError(Exception):
@@ -60,6 +55,11 @@ class TaskReq(BaseModel):
     exhaustPolicy: str | None = None
     fallbackTools: str | list[str] | None = None
     source: str = "API"
+
+
+class PlanReq(BaseModel):
+    projectKey: str
+    milestoneId: str
 
 
 def ok(data: Any) -> dict:
@@ -301,6 +301,56 @@ def create_app(
                     kill_task(task_id)
                 return ok(_task(t))
         raise ApiError(409, "only QUEUED, PAUSED or RUNNING tasks can be cancelled")
+
+    # ── plans ──
+    @r.post("/plans", status_code=201)
+    async def create_plan(req: PlanReq):
+        ws = await _workspace(req.projectKey)
+        if not ws or not ws.get("repos"):
+            raise ApiError(400, f"no workspace with repos for project {req.projectKey}")
+        milestones = await query.project_milestones(req.projectKey) or []
+        m = next((m for m in milestones if m.get("id") == req.milestoneId), None)
+        if not m:
+            raise ApiError(404, f"milestone not found: {req.milestoneId}")
+        key = slug(m.get("name") or "", req.milestoneId)
+        status, plan = await query.create_plan(req.projectKey, req.milestoneId, key)
+        if status == 409:
+            raise ApiError(409, data=plan)
+        scheduler.wake()
+        return ok(plan)
+
+    @r.get("/plans")
+    async def list_plans(projectKey: str | None = None):
+        tasks = await query.list_tasks() or []
+        out = []
+        for p in await query.list_plans(projectKey) or []:
+            done = sum(t.get("planId") == p["id"] and t["status"] == "DONE" for t in tasks)
+            # issues this plan finished are DONE in CIRA, so targets() no longer has them
+            todo = plans.targets(await query.milestone_issues(p["milestoneId"]) or [])
+            out.append({**p, "done": done, "total": len(todo) + done})
+        return ok(out)
+
+    @r.post("/plans/{plan_id}/resume")
+    async def resume_plan(plan_id: str):
+        p = await plans.resume(scheduler, await query.get_plan(plan_id))
+        if not p:
+            raise ApiError(409, "only HALTED plans can be resumed")
+        return ok(p)
+
+    @r.post("/plans/{plan_id}/cancel")
+    async def cancel_plan(plan_id: str):
+        stage = (await query.get_plan(plan_id))["stage"]
+        # worktrees stay; GC removes them after its safety check
+        p = stage not in ("DONE", "CANCELLED") and await query.plan_stage(
+            plan_id, stage, "CANCELLED"
+        )
+        if not p:
+            raise ApiError(409, "plan already ended")
+        return ok(p)
+
+    @r.get("/projects/{project_key}/milestones")
+    async def project_milestones(project_key: str):
+        return ok(await query.project_milestones(project_key))
 
     # ── quotas ──
     async def _quotas() -> dict:
