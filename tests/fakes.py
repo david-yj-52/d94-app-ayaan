@@ -28,6 +28,7 @@ SEED_RULES = {
     "CURSOR": "INTERVAL 60m",
     "FAKE": "INTERVAL 1m",
 }
+PLAN_ENDED = ("DONE", "CANCELLED")
 TRANSITION_FIELDS = {
     "resumeAt",
     "pauseReason",
@@ -64,6 +65,10 @@ class InMemoryQuery:
         self.runs: dict[str, dict] = {}
         self.workspaces: dict[str, dict] = {}
         self.issues: dict[str, dict] = {}
+        self.plans: dict[str, dict] = {}
+        self.milestones: dict[str, list[dict]] = {}  # milestone id -> issues
+        self.project_milestone_list: dict[str, list[dict]] = {}
+        self.done_issues: list[str] = []
         self.fail_finish = 0  # number of finish_run calls that raise
 
     @classmethod
@@ -119,6 +124,25 @@ class InMemoryQuery:
     def task(self, tid: str) -> dict:
         return self.tasks[tid]
 
+    def add_plan(self, **fields) -> str:
+        pid = f"pl{len(self.plans) + 1}"
+        self.plans[pid] = {
+            "id": pid,
+            "projectKey": "P",
+            "milestoneId": "m1",
+            "milestoneKey": "M-1",
+            "stage": "PLANNING",
+            "currentIssueKey": None,
+            "lastError": None,
+            "startedAt": to_query_ts(self.clock()),
+            "endedAt": None,
+            **fields,
+        }
+        return pid
+
+    def plan(self, pid: str) -> dict:
+        return self.plans[pid]
+
     # ── QueryClient surface ──
     async def get_config(self):
         return dict(self.config)
@@ -135,9 +159,12 @@ class InMemoryQuery:
         return dict(self.tools[cd])
 
     async def get_workspaces(self):
-        return [dict(w) for w in self.workspaces.values()]
+        return [{"repos": [], **w} for w in self.workspaces.values()]
 
     async def put_workspace(self, key, body):
+        body = {
+            k: v for k, v in body.items() if not (k == "repos" and v is None)
+        }  # null = untouched
         self.workspaces[key] = {**self.workspaces.get(key, {}), **body, "projectKey": key}
         return dict(self.workspaces[key])
 
@@ -251,6 +278,50 @@ class InMemoryQuery:
 
     async def issue_by_key(self, key):
         return self.issues.get(key)
+
+    async def create_plan(self, project_key, milestone_id, milestone_key):
+        for p in self.plans.values():
+            if p["projectKey"] == project_key and p["stage"] not in PLAN_ENDED:
+                return 409, dict(p)
+        pid = self.add_plan(
+            projectKey=project_key, milestoneId=milestone_id, milestoneKey=milestone_key
+        )
+        return 201, dict(self.plans[pid])
+
+    async def list_plans(self, project_key=None, active=None):
+        return [
+            dict(p)
+            for p in self.plans.values()
+            if (not project_key or p["projectKey"] == project_key)
+            and (active is None or (p["stage"] not in PLAN_ENDED) == active)
+        ]
+
+    async def get_plan(self, plan_id):
+        return dict(self.plans[plan_id])
+
+    async def plan_stage(self, plan_id, expected, next, **fields):
+        p = self.plans[plan_id]
+        if p["stage"] != expected or p["stage"] in PLAN_ENDED:
+            return None
+        p["stage"] = next
+        if next != "HALTED":
+            p["lastError"] = None
+        if next in PLAN_ENDED:
+            fields.setdefault("endedAt", to_query_ts(self.clock()))
+        p.update(fields)
+        return dict(p)
+
+    async def milestone_issues(self, milestone_id):
+        return [dict(i) for i in self.milestones.get(milestone_id, [])]
+
+    async def project_milestones(self, project_key):
+        return [dict(m) for m in self.project_milestone_list.get(project_key, [])]
+
+    async def issue_done(self, issue_key):
+        changed = issue_key not in self.done_issues
+        if changed:
+            self.done_issues.append(issue_key)
+        return changed
 
 
 class FakeEcc:

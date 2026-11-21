@@ -119,6 +119,45 @@ class QueryClient:
         resp = await self._call("GET", f"/issues/by-key/{_q(key)}", ok=(200, 404))
         return resp.json().get("data") if resp.status_code == 200 else None
 
+    async def create_plan(
+        self, project_key: str, milestone_id: str, milestone_key: str
+    ) -> tuple[int, dict]:
+        body = {
+            "projectKey": project_key,
+            "milestoneId": milestone_id,
+            "milestoneKey": milestone_key,
+        }
+        resp = await self._call("POST", "/plans", ok=(201, 409), json=body)
+        return resp.status_code, resp.json().get("data")
+
+    async def list_plans(
+        self, project_key: str | None = None, active: bool | None = None
+    ) -> list[dict]:
+        params = {}
+        if project_key:
+            params["projectKey"] = project_key
+        if active is not None:
+            params["active"] = str(active).lower()
+        return await self._data("GET", "/plans", params=params)
+
+    async def get_plan(self, plan_id: str) -> dict:
+        return await self._data("GET", f"/plans/{_q(plan_id)}")
+
+    async def plan_stage(self, plan_id: str, expected: str, next: str, **fields) -> dict | None:
+        body = {"expectedStage": expected, "nextStage": next, **fields}
+        resp = await self._call("POST", f"/plans/{_q(plan_id)}/stage", ok=(200, 409), json=body)
+        return resp.json().get("data") if resp.status_code == 200 else None
+
+    async def milestone_issues(self, milestone_id: str) -> list[dict]:
+        return await self._data("GET", f"/milestones/{_q(milestone_id)}/issues")
+
+    async def project_milestones(self, project_key: str) -> list[dict]:
+        return await self._data("GET", f"/projects/{_q(project_key)}/milestones")
+
+    async def issue_done(self, issue_key: str) -> bool:
+        data = await self._data("POST", f"/issues/by-key/{_q(issue_key)}/done", json={})
+        return bool(data and data.get("changed"))
+
 
 class EccClient:
     DELAYS = (1, 5, 30)
