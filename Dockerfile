@@ -8,6 +8,13 @@ RUN apt-get update \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+# JDK 21 + Maven for plan tasks. Temurin apt repo: gives JDK 21 on whichever Debian the slim
+# base is (bookworm has no openjdk-21 package)
+RUN curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo $VERSION_CODENAME) main" > /etc/apt/sources.list.d/adoptium.list \
+    && apt-get update && apt-get install -y --no-install-recommends temurin-21-jdk maven \
+    && rm -rf /var/lib/apt/lists/* \
+    && java -version 2>&1 | grep -q '"21' && mvn -v
 # CLI versions pinned per docs/cli-probe.md (Cursor installer is unpinned)
 RUN npm i -g @anthropic-ai/claude-code@2.1.322 @openai/codex@0.167.1 @google/gemini-cli@0.68.0
 RUN useradd -m -u 10001 -d /home/ayaan ayaan && mkdir -p /data && chown ayaan:ayaan /data

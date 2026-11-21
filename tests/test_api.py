@@ -445,3 +445,37 @@ def test_project_milestones(env):
     c, _ = _plan_env(env)
     r = c.get(f"{P}/projects/CIRA/milestones", headers=TOKEN)
     assert r.json()["data"] == [{"id": "m1", "name": "Sprint 1!"}]
+
+
+def test_delete_task_workspace(env):
+    import subprocess
+
+    c, q, _, _, _, tmp = env
+    d = tmp / ".tasks" / "CIRA-1"
+    (d / "r1").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(d / "r1")], check=True)
+    (d / "r1" / "f.txt").write_text("dirty")
+    tid = q.add_task(issueKey="CIRA-1", status="DONE", workspacePath=str(d))
+    r = c.delete(f"{P}/tasks/{tid}/workspace", headers=TOKEN)
+    assert r.status_code == 409 and d.exists()
+    running = q.add_task(issueKey="CIRA-2", status="RUNNING", workspacePath=str(tmp / "x"))
+    assert c.delete(f"{P}/tasks/{running}/workspace", headers=TOKEN).status_code == 409
+    gone = q.add_task(issueKey="CIRA-3", status="DONE", workspacePath=str(tmp / "nope"))
+    assert c.delete(f"{P}/tasks/{gone}/workspace", headers=TOKEN).status_code == 200
+
+
+def test_setup_check_step3_remote_and_java_warning(env, origin, monkeypatch):
+    c, q = env[0], env[1]
+    q.workspaces["CIRA"]["repos"][0]["gitUrl"] = str(origin)
+    q.workspaces["BAD"] = {
+        "projectKey": "BAD",
+        "repos": [{"repoNm": "x", "gitUrl": "/nonexistent.git", "baseBranch": "main"}],
+    }
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")  # no mvn/java wherever they live
+    items = {
+        i["name"]: i for i in c.get(f"{P}/setup/check", headers=TOKEN).json()["data"][2]["items"]
+    }
+    assert items["CIRA/r1"]["ok"] is True and items["BAD/x"]["ok"] is False
+    for tool in ("java", "mvn"):
+        if not items[tool]["ok"]:  # absent: warning, never a failure
+            assert items[tool].get("warning") is True

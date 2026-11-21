@@ -22,7 +22,7 @@ NOTIFY = {
 DEFAULT_TEMPLATE = (
     "CIRA 이슈 {issueKey}: {title}\n\n{content}\n\n"
     "위 이슈를 구현하고 테스트·빌드를 통과시킨 뒤, "
-    "저장소 규칙(CLAUDE.md/AGENTS.md)에 따라 커밋·배포까지 진행해.\n"
+    "저장소 규칙(CLAUDE.md/AGENTS.md)에 따라 커밋까지 진행해. push와 배포는 Ayaan이 처리한다.\n"
     "완료되면 마지막 줄에 'AYAAN_RESULT: <한 줄 요약>'을 출력해."
 )
 POLICIES = {"WAIT_SAME_TOOL", "SWITCH_TOOL"}
@@ -39,6 +39,7 @@ _KNOWN = set(_INT_RANGES) | {
     "FALLBACK_TOOL_ORDER",
     "CLAUDE_USAGE_POLL",
     "REPORT_CRON",
+    "WORKTREE_GC_CRON",
     "NOTIFY_EVENTS",
     "DEFAULT_PROJECT_KEY",
     "CLAUDE_PLUGINS",
@@ -125,7 +126,7 @@ def validate_config(values: dict[str, str]) -> dict[str, str]:
         elif k == "CLAUDE_USAGE_POLL":
             if v not in ("true", "false"):
                 errs[k] = "must be true or false"
-        elif k == "REPORT_CRON":
+        elif k in ("REPORT_CRON", "WORKTREE_GC_CRON"):
             if v.strip() and not (len(v.split()) == 5 and croniter.is_valid(v)):
                 errs[k] = "must be empty or a valid 5-field cron"
         elif k == "CLAUDE_PLUGINS":

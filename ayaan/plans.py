@@ -217,3 +217,66 @@ async def advance_plans(sched) -> None:
                     await sched.query.plan_stage(plan["id"], "HALTED", "RUNNING")
             continue
         await step(sched, plan)
+
+
+# ── worktree GC (spec: never touches .repos/) ──
+
+ENDED = ("DONE", "CANCELLED")
+
+
+async def safe_remove(root: Path, issue_key: str, repos: list[dict]) -> bool:
+    """Removes <root>/.tasks/<issue_key> unless a repo worktree is dirty or unpushed (or git
+    refuses); in that case nothing is deleted and False is returned."""
+    tdir = git.task_dir(root, issue_key)
+    paths = [(tdir / r["repoNm"], r) for r in repos if (tdir / r["repoNm"]).exists()]
+    known = {r["repoNm"] for r in repos}
+    if tdir.is_dir() and any(  # a checkout we cannot vouch for: leave it alone
+        c.name not in known and (c / ".git").exists() for c in tdir.iterdir()
+    ):
+        return False
+    try:
+        for path, r in paths:
+            # unpushed commits matter only if the branch has work beyond its base
+            if await git.dirty(path) or (
+                await git.unpushed(path)
+                and await git.has_commits(path, f"origin/{r['baseBranch']}")
+            ):
+                return False
+        for path, r in paths:
+            await git.remove_worktree(path, git.repo_dir(root, r["repoNm"]))
+    except git.GitError:
+        log.warning("worktree cleanup of %s held", tdir, exc_info=True)
+        return False
+    shutil.rmtree(tdir, ignore_errors=True)
+    return True
+
+
+async def removable(query, tasks: list[dict]) -> bool:
+    """True if every given task ended and none belongs to a plan that is still active."""
+    plan_ids = {t["planId"] for t in tasks if t.get("planId")}
+    stages = {p["id"]: p["stage"] for p in await query.list_plans() or []}
+    return all(t["status"] in ENDED for t in tasks) and all(
+        stages.get(i, "DONE") in ENDED for i in plan_ids
+    )
+
+
+async def gc_worktrees(sched) -> list[str]:
+    """Returns the folders kept because of uncommitted/unpushed work."""
+    root = sched.settings.workspace_root_paths[0]
+    base = root / ".tasks"
+    if not base.is_dir():
+        return []
+    q = sched.query
+    all_tasks = await q.list_tasks() or []
+    by_dir: dict[str, list[dict]] = {}
+    for t in all_tasks:
+        by_dir.setdefault(Path(t["workspacePath"]).name, []).append(t)
+    # ponytail: orphan folders have no project, so every mapped repo name is tried
+    repos = {r["repoNm"]: r for w in await q.get_workspaces() or [] for r in w.get("repos") or []}
+    held = []
+    for d in sorted(p for p in base.iterdir() if p.is_dir()):
+        if await removable(q, by_dir.get(d.name, [])) and not await safe_remove(
+            root, d.name, list(repos.values())
+        ):
+            held.append(str(d))
+    return held

@@ -302,6 +302,22 @@ def create_app(
                 return ok(_task(t))
         raise ApiError(409, "only QUEUED, PAUSED or RUNNING tasks can be cancelled")
 
+    @r.delete("/tasks/{task_id}/workspace")
+    async def delete_task_workspace(task_id: str):
+        t = await query.get_task(task_id)
+        siblings = [
+            x for x in await query.list_tasks() or [] if x["workspacePath"] == t["workspacePath"]
+        ]
+        if not await plans.removable(query, siblings):
+            raise ApiError(409, "task or its plan is still active")
+        repos = {
+            r["repoNm"]: r for w in await query.get_workspaces() or [] for r in w.get("repos") or []
+        }
+        root = settings.workspace_root_paths[0]
+        if not await plans.safe_remove(root, Path(t["workspacePath"]).name, list(repos.values())):
+            raise ApiError(409, "workspace has uncommitted or unpushed changes")
+        return ok(True)
+
     # ── plans ──
     @r.post("/plans", status_code=201)
     async def create_plan(req: PlanReq):

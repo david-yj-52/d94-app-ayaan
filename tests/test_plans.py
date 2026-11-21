@@ -185,3 +185,71 @@ async def test_merge_error_halt_does_not_auto_resume(tmp_path):
     assert p["stage"] == "HALTED" and p["lastError"].startswith("PREPARING:")
     await s.tick()
     assert q.plan(pid)["stage"] == "HALTED" and ecc.events().count("PLAN_HALTED") == 1
+
+
+# ── worktree GC / mapping migration ──
+
+
+async def _wt(q, s, origins, key, status, plan_id=None, push=False, edit=None):
+    """A task whose worktree exists under <root>/.tasks/<key>/r1."""
+    from ayaan import git as g
+
+    root = s.settings.workspace_root_paths[0]
+    repo = q.workspaces["P"]["repos"][0]
+    path = await g.add_worktree(root, repo, key, "origin/main")
+    if edit:
+        commit(path, "x.txt", "x\n")
+    if push:
+        git(path, "push", "-q", "-u", "origin", f"HEAD:refs/heads/ayaan/{key}")
+    q.add_task(issueKey=key, status=status, planId=plan_id, workspacePath=str(path.parent))
+    return path.parent
+
+
+async def test_gc_removes_done_plan_worktrees(tmp_path):
+    q, _, s, _, origins, pid = _setup(tmp_path, [])
+    q.plan(pid)["stage"] = "DONE"
+    d = await _wt(q, s, origins, "TASKS-1", "DONE", pid)
+    root = s.settings.workspace_root_paths[0]
+    assert await plans.gc_worktrees(s) == []
+    assert not d.exists() and (root / ".repos" / "r1" / ".git").exists()
+
+
+async def test_gc_skips_unpushed_and_reports(tmp_path):
+    q, ecc, s, _, origins, _ = _setup(tmp_path, [])
+    d = await _wt(q, s, origins, "TASKS-1", "DONE", edit=True)  # commit, never pushed
+    s.gc_held = await plans.gc_worktrees(s)
+    assert s.gc_held == [str(d)] and d.exists()
+    await s.send_report()
+    assert f"정리 보류: {d}" in ecc.sent[-1][2]
+
+
+async def test_gc_keeps_running_task_and_active_plan(tmp_path):
+    q, _, s, _, origins, pid = _setup(tmp_path, [])
+    a = await _wt(q, s, origins, "TASKS-1", "RUNNING")
+    b = await _wt(q, s, origins, "TASKS-2", "DONE", pid)  # plan still PREPARING
+    assert await plans.gc_worktrees(s) == []
+    assert a.exists() and b.exists()
+
+
+async def test_gc_removes_orphan_and_pushed_clean_dirs(tmp_path):
+    q, _, s, _, origins, _ = _setup(tmp_path, [])
+    d = await _wt(q, s, origins, "TASKS-1", "CANCELLED", push=True)
+    q.tasks.clear()  # folder with no linked task at all
+    assert await plans.gc_worktrees(s) == []
+    assert not d.exists()
+
+
+async def test_migrate_workspace_creates_repo_row(tmp_path, origin):
+    clone = tmp_path / "myrepo"
+    git(tmp_path, "clone", "-q", str(origin), str(clone))
+    q = InMemoryQuery.seeded(FakeClock(NOW))
+    q.workspaces["P"] = {"projectKey": "P", "workspacePath": str(clone)}
+    q.workspaces["Q"] = {"projectKey": "Q", "workspacePath": str(tmp_path / "gone")}
+    settings = Settings(_env_file=None, data_dir=str(tmp_path), workspace_roots=str(tmp_path))
+    s = Scheduler(q, FakeEcc(), settings, clock=q.clock)
+    await s.migrate_workspaces()
+    await s.migrate_workspaces()  # idempotent
+    assert q.workspaces["P"]["repos"] == [
+        {"repoNm": "myrepo", "gitUrl": str(origin), "baseBranch": "main", "sortOrd": 0}
+    ]
+    assert not q.workspaces["Q"].get("repos")

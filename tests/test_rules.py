@@ -126,6 +126,19 @@ def test_validate_config_accepts_valid_and_rejects_others():
     }
 
 
+def test_worktree_gc_cron_validation():
+    assert validate_config({"WORKTREE_GC_CRON": "0 4 * * *"}) == {}
+    assert validate_config({"WORKTREE_GC_CRON": ""}) == {}
+    assert set(validate_config({"WORKTREE_GC_CRON": "bad"})) == {"WORKTREE_GC_CRON"}
+
+
+def test_default_template_leaves_push_to_ayaan():
+    from ayaan.rules import DEFAULT_TEMPLATE
+
+    assert "커밋까지 진행해. push와 배포는 Ayaan이 처리한다." in DEFAULT_TEMPLATE
+    assert "배포까지" not in DEFAULT_TEMPLATE
+
+
 def test_validate_tool():
     assert (
         validate_tool(

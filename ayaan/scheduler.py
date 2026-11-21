@@ -30,6 +30,7 @@ LEASE_EXTEND_S = 60
 SETTLE_BACKOFF = (5, 15, 30, 60)  # then every 60 s
 RESUME_PROMPT = "중단된 작업을 이어서 진행해. 작업공간의 현재 상태를 먼저 확인해."
 SWITCH_NOTE = "\n\n작업공간에 이전 Tool이 진행한 변경사항이 있다. 먼저 확인하고 이어서 진행해."
+GC_CRON_DEFAULT = "0 4 * * *"
 EXE_MISSING = "실행 파일을 찾을 수 없음"
 KEY_ENV = {
     "CLAUDE": "ANTHROPIC_API_KEY",
@@ -141,6 +142,7 @@ class Scheduler:
         self.running: dict[str, int] = defaultdict(int)
         self.warnings: list[str] = []
         self._cfg: dict = {}
+        self.gc_held: list[str] = []  # folders the last GC kept; listed in the report
         self._tasks: set[asyncio.Task] = set()
         self._loops: list[asyncio.Task] = []
         self._wake = asyncio.Event()
@@ -174,6 +176,7 @@ class Scheduler:
             asyncio.create_task(self._tick_loop()),
             asyncio.create_task(self._collect_loop()),
             asyncio.create_task(self._report_loop()),
+            asyncio.create_task(self._gc_loop()),
         ]
 
     async def stop(self) -> None:
@@ -225,6 +228,44 @@ class Scheduler:
                 log.exception("report failed")
             last = now
 
+    async def _gc_loop(self):
+        # same polling as _report_loop; key absent = default, empty value disables
+        last = self.clock()
+        while True:
+            await asyncio.sleep(30)
+            now = self.clock()
+            try:
+                cron = self._cfg.get("WORKTREE_GC_CRON", GC_CRON_DEFAULT).strip()
+                if cron and croniter(cron, last.astimezone(KST)).get_next(datetime) <= now:
+                    self.gc_held = await plans.gc_worktrees(self)
+            except Exception:
+                log.exception("worktree gc failed")
+            last = now
+
+    async def migrate_workspaces(self) -> None:
+        """Pre-plan mappings (workspacePath, no repos) get one repo row from the clone's origin."""
+        for w in await self.query.get_workspaces() or []:
+            path = w.get("workspacePath")
+            if w.get("repos") or not path or not Path(path).is_dir():
+                continue
+            try:
+                url = await git._git(Path(path), "remote", "get-url", "origin")
+                head = await git._git(
+                    Path(path), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"
+                )
+            except git.GitError as e:
+                if "get-url" in e.cmd:
+                    log.warning("migrate %s: no origin remote", w["projectKey"])
+                    continue
+                head = "origin/main"  # origin/HEAD not recorded
+            repo = {
+                "repoNm": Path(path).name,
+                "gitUrl": url,
+                "baseBranch": head.removeprefix("origin/"),
+                "sortOrd": 0,
+            }
+            await self.query.put_workspace(w["projectKey"], {"repos": [repo]})
+
     async def send_report(self) -> None:
         tasks = await self.query.list_tasks() or []
         counts: dict[str, int] = defaultdict(int)
@@ -232,6 +273,7 @@ class Scheduler:
             counts[t["status"]] += 1
         paused = [t for t in tasks if t["status"] == "PAUSED"]
         body = format_report(await self.query.get_quotas() or [], counts, paused)
+        body += "".join(f"\n정리 보류: {p}" for p in self.gc_held)
         try:  # not an immediate event: NOTIFY_EVENTS does not filter it
             await self.ecc.notify("REPORT", "ayaan 정기 리포트", body)
         except Exception:
@@ -245,6 +287,10 @@ class Scheduler:
                 path.unlink()
             except Exception:
                 log.warning("spool replay failed for %s", path.name, exc_info=True)
+        try:
+            await self.migrate_workspaces()
+        except Exception:
+            log.warning("workspace migration failed", exc_info=True)
         await self._recover()
         self.wake()
 

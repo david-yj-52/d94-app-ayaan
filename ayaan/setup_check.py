@@ -47,7 +47,11 @@ async def _run(*args: str) -> tuple[int | None, str]:
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**child_env(), "GIT_TERMINAL_PROMPT": "0"},
+            env={
+                **child_env(),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_SSH_COMMAND": "ssh -o BatchMode=yes",
+            },
         )
     except OSError:
         return None, "not found"
@@ -81,16 +85,24 @@ async def _version(cd: str, exe: str | None) -> dict:
     return _item(f"{cd} version", ok, f"installed {installed}, tested {tested}")
 
 
-async def _git(ws: dict, git: str | None) -> dict:
-    path = Path(ws.get("workspacePath") or "")
-    name = ws.get("projectKey") or str(path)
-    if not path.is_dir():
-        return _item(name, False, "workspace path does not exist")
+async def _git(name: str, url: str, git: str | None) -> dict:
     if git is None:
         return _item(name, False, EXE_MISSING)
-    code, _ = await _run(git, "-C", str(path), "ls-remote", "--exit-code", "origin")
+    code, _ = await _run(git, "ls-remote", "--exit-code", "--", url, "HEAD")
     # output is never returned: a remote error can echo a URL with embedded credentials
     return _item(name, code == 0, "git ls-remote ok" if code == 0 else "git ls-remote failed")
+
+
+async def _noop(item: dict) -> dict:
+    return item
+
+
+async def _build_tool(name: str, arg: str, settings: Settings) -> dict:
+    exe = resolve_exe(name, settings)
+    code, out = await _run(exe, arg) if exe else (None, "")
+    if code == 0:
+        return _item(name, True, (out.splitlines() or [""])[0][:80])
+    return {**_item(name, True, f"경고: {name} 없음 (Maven 빌드 불가)"), "warning": True}
 
 
 async def run_setup_check(query, settings: Settings) -> list[dict]:
@@ -124,9 +136,16 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
             present = bool(ref and os.environ.get(ref))
             step2.append(_item(t["toolCd"], present, f"{ref} {'set' if present else 'missing'}"))
 
-    # 3. workspace path + git remote
+    # 3. per-repo git remote, plus java/mvn (plan tasks build with them: warning only)
     git = resolve_exe("git", settings)
-    step3 = list(await asyncio.gather(*(_git(w, git) for w in workspaces)))
+    probes = []
+    for w in workspaces:
+        repos = w.get("repos") or []
+        if not repos:
+            probes.append(_noop(_item(str(w.get("projectKey")), False, "no repos mapped")))
+        probes += [_git(f"{w.get('projectKey')}/{r['repoNm']}", r["gitUrl"], git) for r in repos]
+    step3 = list(await asyncio.gather(*probes))
+    step3 += [await _build_tool(n, a, settings) for n, a in (("java", "-version"), ("mvn", "-v"))]
 
     # 4. ECC health, 5. via gateway
     ecc_ok, ecc_detail = await _http(f"{settings.ecc_base_url.rstrip('/')}/actuator/health")
