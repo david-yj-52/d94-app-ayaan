@@ -7,3 +7,5 @@ __pycache__/
 data/
 workspace/
 cli-auth/
+
+.worktrees/
