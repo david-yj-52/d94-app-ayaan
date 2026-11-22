@@ -165,7 +165,9 @@ class InMemoryQuery:
 
     async def put_workspace(self, key, body):
         body = {
-            k: v for k, v in body.items() if not (k == "repos" and v is None)
+            k: v
+            for k, v in body.items()
+            if not (k in ("repos", "workspacePath", "defaultTool") and v is None)
         }  # null = untouched
         # d94-query PUT replaces promptTemplate: absent/null clears it
         body = {"promptTemplate": None, **body}
