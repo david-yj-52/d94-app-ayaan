@@ -271,3 +271,38 @@ async def test_gc_removes_never_pushed_worktree_without_commits(tmp_path):
     d = await _wt(q, s, origins, "TASKS-1", "DONE")  # no upstream, nothing beyond origin/main
     assert await plans.gc_worktrees(s) == []
     assert not d.exists()
+
+
+async def test_cancelled_plan_task_halts_and_resume_requeues(tmp_path):
+    q, ecc, s, runner, _, pid = _setup(tmp_path, [iss(2)])
+    tid = q.add_task(
+        issueKey="TASKS-2",
+        status="CANCELLED",
+        planId=pid,
+        workspacePath=str(tmp_path / "root" / ".tasks" / "TASKS-2"),
+    )
+    p = await _run(s, q, pid)
+    assert p["stage"] == "HALTED" and p["lastError"] == "RUNNING: task TASKS-2 CANCELLED"
+    await s.tick()  # no auto-unhalt loop, no second task for the issue
+    assert q.plan(pid)["stage"] == "HALTED" and len(q.tasks) == 1
+    assert ecc.events().count("PLAN_HALTED") == 1
+    assert (await plans.resume(s, q.plan(pid)))["stage"] == "RUNNING"
+    assert q.task(tid)["status"] == "QUEUED"
+    assert (await _run(s, q, pid))["stage"] == "DONE"
+
+
+async def test_repo_added_mid_plan_does_not_halt(tmp_path):
+    hook = {}
+    q, _, s, _, origins, pid = _setup(tmp_path, [iss(1), iss(2)], act=lambda c: hook["f"](c))
+    r2 = _bare(tmp_path, "r2")[0]
+
+    def act(cwd):
+        commit_r1(cwd)
+        repos = q.workspaces["P"]["repos"]
+        if len(repos) == 1:  # added while the first task runs: no .repos/r2 yet
+            repos.append({"repoNm": "r2", "gitUrl": str(r2), "baseBranch": "main", "sortOrd": 9})
+
+    hook["f"] = act
+    p = await _run(s, q, pid)
+    assert p["stage"] == "DONE", p.get("lastError")
+    assert {"TASKS-1.txt", "TASKS-2.txt"} <= _files(origins["r1"][0], "deploy")

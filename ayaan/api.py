@@ -292,15 +292,21 @@ def create_app(
                 return ok(_task(t))
         raise ApiError(409, "only PAUSED or FAILED tasks can be resumed")
 
-    @r.post("/tasks/{task_id}/cancel")
-    async def cancel_task(task_id: str):
+    async def _cancel(task_id: str) -> dict | None:
         for expected in ("QUEUED", "PAUSED", "RUNNING"):
             t = await query.transition(task_id, expected, "CANCELLED")
             if t:
                 if expected == "RUNNING":
                     kill_task(task_id)
-                return ok(_task(t))
-        raise ApiError(409, "only QUEUED, PAUSED or RUNNING tasks can be cancelled")
+                return t
+        return None
+
+    @r.post("/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str):
+        t = await _cancel(task_id)
+        if not t:
+            raise ApiError(409, "only QUEUED, PAUSED or RUNNING tasks can be cancelled")
+        return ok(_task(t))
 
     @r.delete("/tasks/{task_id}/workspace")
     async def delete_task_workspace(task_id: str):
@@ -362,6 +368,9 @@ def create_app(
         )
         if not p:
             raise ApiError(409, "plan already ended")
+        for t in await plans.plan_tasks(query, plan_id):
+            if t["status"] in plans.ACTIVE_TASK:
+                await _cancel(t["id"])
         return ok(p)
 
     @r.get("/projects/{project_key}/milestones")

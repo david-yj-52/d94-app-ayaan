@@ -596,3 +596,16 @@ async def test_plan_without_milestone_key_fails_prepare(settings):
     t = q.task(tid)
     assert t["status"] == "FAILED" and t["failReason"] == "prepare: plan pl1 has no milestoneKey"
     assert runner.calls == []
+
+
+async def test_legacy_workspace_path_runs_in_place_without_worktrees(settings, tmp_path):
+    """A task created before plan pipeline points at the old shared clone: keep old behaviour."""
+    legacy = tmp_path / "workspace" / "d94-query"
+    legacy.mkdir(parents=True)
+    q, _, clock, runner, s = _setup([ok_result("s1")], settings)
+    tid = q.add_task(tool="CLAUDE", issueKey="TASKS-1", workspacePath=str(legacy))
+    await s.tick()
+    await s.drain()
+    assert q.task(tid)["status"] == "DONE"
+    assert runner.calls[0].cwd == legacy and runner.calls[0].prompt == "do it"
+    assert not (settings.workspace_root_paths[0] / ".tasks").exists()

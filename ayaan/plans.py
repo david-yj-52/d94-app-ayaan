@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 ACTIVE_TASK = ("RUNNING", "QUEUED", "PAUSED")
 TASK_FAILED = "RUNNING: task "  # lastError prefix of a halt caused by a FAILED plan task
+STOPPED = ("FAILED", "CANCELLED")  # plan task ended without DONE: the plan halts on it
 
 
 def targets(issues: list[dict]) -> list[dict]:
@@ -76,7 +77,9 @@ async def _running(sched, plan, root, repos, branch):
     for t in tasks:
         if t["status"] == "DONE" and Path(t["workspacePath"]).exists():
             await _integrate(sched, t, root, repos, branch)
-    failed = next((t for t in tasks if t["status"] == "FAILED"), None)
+    failed = next((t for t in tasks if t["status"] in STOPPED), None)
+    if failed and failed["status"] == "CANCELLED":
+        raise RuntimeError(f"task {failed['issueKey']} CANCELLED")
     if failed:
         reason = ((failed.get("failReason") or "").splitlines() or [""])[0]
         raise RuntimeError(f"task {failed['issueKey']} FAILED: {reason}")
@@ -176,7 +179,7 @@ async def step(sched, plan: dict) -> str:
         raise  # d94-query unreachable: not a plan failure, the next tick retries the stage
     except Exception as e:
         log.warning("plan %s halted in %s", plan["id"], stage, exc_info=True)
-        msg = f"{stage}: {e}"[:2000]
+        msg = git.redact(f"{stage}: {e}")[:2000]
         if not await q.plan_stage(plan["id"], stage, "HALTED", lastError=msg):
             return (await q.get_plan(plan["id"]))["stage"]
         await _notice(sched, "PLAN_HALTED", plan, msg)
@@ -191,18 +194,20 @@ async def step(sched, plan: dict) -> str:
 
 
 async def resume(sched, plan: dict) -> dict | None:
-    """HALTED → RUNNING with the failed task requeued (same task, R3), else → the stage
-    named in lastError. None if the plan is not HALTED."""
+    """HALTED → RUNNING with the failed/cancelled task requeued (same task, R3), else → the
+    stage named in lastError. None if the plan is not HALTED."""
     if plan["stage"] != "HALTED":
         return None
-    failed = [t for t in await plan_tasks(sched.query, plan["id"]) if t["status"] == "FAILED"]
+    failed = [t for t in await plan_tasks(sched.query, plan["id"]) if t["status"] in STOPPED]
     head = (plan.get("lastError") or "").split(":", 1)[0]
     nxt = "RUNNING" if failed else head if head in STEPS else "PREPARING"
     p = await sched.query.plan_stage(plan["id"], "HALTED", nxt)
     if p:
         now = to_query_ts(sched.clock())
         for t in failed:  # same fields as api.resume_task
-            await sched.query.transition(t["id"], "FAILED", "QUEUED", resumeAt=now, resumeCount=0)
+            await sched.query.transition(
+                t["id"], t["status"], "QUEUED", resumeAt=now, resumeCount=0
+            )
         sched.wake()
     return p
 
@@ -210,10 +215,10 @@ async def resume(sched, plan: dict) -> dict | None:
 async def advance_plans(sched) -> None:
     for plan in await sched.query.list_plans(active=True) or []:
         if plan["stage"] == "HALTED":
-            # the task's own [재시도] requeued it: the plan follows once nothing is FAILED
+            # the task's own [재시도] requeued it: the plan follows once nothing is stopped
             if (plan.get("lastError") or "").startswith(TASK_FAILED):
                 tasks = await plan_tasks(sched.query, plan["id"])
-                if not any(t["status"] == "FAILED" for t in tasks):
+                if not any(t["status"] in STOPPED for t in tasks):
                     await sched.query.plan_stage(plan["id"], "HALTED", "RUNNING")
             continue
         await step(sched, plan)

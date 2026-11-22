@@ -4,6 +4,8 @@ import copy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import httpx
+
 from ayaan.adapters import RunEvent
 from ayaan.clients import from_query_ts, to_query_ts
 from ayaan.runner import RunResult
@@ -200,7 +202,7 @@ class InMemoryQuery:
         ]
 
     async def get_task(self, task_id):
-        t = dict(self.tasks[task_id])
+        t = dict(_found(self.tasks, task_id))
         runs = [dict(r) for r in self.runs.values() if r["taskId"] == task_id]
         t["runs"] = runs
         t["tokenTotals"] = {
@@ -303,7 +305,7 @@ class InMemoryQuery:
         ]
 
     async def get_plan(self, plan_id):
-        return dict(self.plans[plan_id])
+        return dict(_found(self.plans, plan_id))
 
     async def plan_stage(self, plan_id, expected, next, **fields):
         p = self.plans[plan_id]
@@ -349,6 +351,15 @@ class FakeEcc:
 
     def events(self) -> list[str]:
         return [s[0] for s in self.sent]
+
+
+def _found(rows: dict, key: str) -> dict:
+    """d94-query answers an unknown id with 404 (EntityNotFoundException)."""
+    if key not in rows:
+        req = httpx.Request("GET", f"http://query/{key}")
+        resp = httpx.Response(404, json={"message": f"not found: {key}"}, request=req)
+        raise httpx.HTTPStatusError("404", request=req, response=resp)
+    return rows[key]
 
 
 def fake_runner(script: list[RunResult], gate=None, act=None):

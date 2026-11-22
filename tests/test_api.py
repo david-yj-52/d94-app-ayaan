@@ -479,3 +479,22 @@ def test_setup_check_step3_remote_and_java_warning(env, origin, monkeypatch):
     for tool in ("java", "mvn"):
         if not items[tool]["ok"]:  # absent: warning, never a failure
             assert items[tool].get("warning") is True
+
+
+def test_unknown_task_or_plan_is_404(env):
+    c = env[0]
+    assert c.delete(f"{P}/tasks/nope/workspace", headers=TOKEN).status_code == 404
+    assert c.post(f"{P}/plans/nope/cancel", headers=TOKEN).status_code == 404
+    assert c.post(f"{P}/plans/nope/resume", headers=TOKEN).status_code == 404
+
+
+def test_cancel_plan_cancels_its_active_task(env, monkeypatch):
+    c, q = _plan_env(env)
+    killed = []
+    monkeypatch.setattr(api, "kill_task", lambda tid: killed.append(tid) or True)
+    pid = q.add_plan(projectKey="CIRA", stage="RUNNING")
+    running = q.add_task(status="RUNNING", planId=pid)
+    other = q.add_task(status="RUNNING")
+    assert c.post(f"{P}/plans/{pid}/cancel", headers=TOKEN).status_code == 200
+    assert q.task(running)["status"] == "CANCELLED" and killed == [running]
+    assert q.task(other)["status"] == "RUNNING"

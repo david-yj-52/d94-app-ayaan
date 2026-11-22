@@ -9,13 +9,24 @@ per-clone asyncio.Lock (one process owns `<root>`).
 import asyncio
 import os
 import re
+import signal
 from pathlib import Path
+
+# ponytail: one cap for every git call (a big clone must fit); make it a setting if not
+GIT_TIMEOUT_S = 600.0
+_USERINFO = re.compile(r"(\w+://)[^/@\s]+@")
+
+
+def redact(text: str) -> str:
+    """`scheme://user:pass@host` → `scheme://***@host`: git echoes remote URLs in errors."""
+    return _USERINFO.sub(r"\1***@", text)
 
 
 class GitError(Exception):
     def __init__(self, repo: str, cmd: str, stderr: str):
-        super().__init__(f"[{repo}] git {cmd}: {stderr.strip()}")
-        self.repo, self.cmd, self.stderr = repo, cmd, stderr
+        stderr = redact(stderr)
+        super().__init__(f"[{repo}] git {redact(cmd)}: {stderr.strip()}")
+        self.repo, self.cmd, self.stderr = repo, redact(cmd), stderr
 
 
 _locks: dict[Path, asyncio.Lock] = {}
@@ -43,11 +54,18 @@ async def _run(cwd: Path, *args: str) -> tuple[int, str, str]:
         "git",
         *args,
         cwd=cwd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"},
+        start_new_session=True,  # own process group: a timeout also kills ssh/hooks
     )
-    out, err = await proc.communicate()
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), GIT_TIMEOUT_S)
+    except TimeoutError:
+        os.killpg(proc.pid, signal.SIGKILL)
+        await proc.wait()
+        raise GitError(cwd.name, " ".join(args), f"timed out after {GIT_TIMEOUT_S:g}s") from None
     return proc.returncode, out.decode().strip(), err.decode()
 
 
@@ -74,6 +92,7 @@ async def _clone_or_fetch(root: Path, repo: dict) -> Path:
     """Caller holds the clone lock."""
     d = repo_dir(root, repo["repoNm"])
     if (d / ".git").exists():
+        await _git(d, "remote", "set-url", "origin", repo["gitUrl"])  # mapping may have moved
         await _git(d, "fetch", "--prune", "origin")
     else:
         d.parent.mkdir(parents=True, exist_ok=True)
@@ -162,6 +181,8 @@ async def rebase_ff(root: Path, repo: dict, branch: str) -> bool:
 
 async def _rebase_ff(d: Path, branch: str, base: str) -> bool:
     src, dst = f"origin/{branch}", f"origin/{base}"
+    if not await _ok(d, "rev-parse", "--verify", "--quiet", src):
+        return False  # repo mapped after PREPARING: the plan never touched it
     if await _ok(d, "merge-base", "--is-ancestor", src, dst):
         return False
     old = await _git(d, "rev-parse", src)
@@ -201,6 +222,8 @@ async def merged_since(root: Path, repo: dict, plan_branch: str, since: str) -> 
 
 async def delete_branch(root: Path, repo: dict, branch: str) -> None:
     d = repo_dir(root, repo["repoNm"])
+    if not (d / ".git").exists():
+        return  # never cloned here (repo mapped later): nothing of ours to delete
     async with _lock(d):
         if await _ok(d, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"):
             await _git(d, "branch", "-D", branch)

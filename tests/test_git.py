@@ -155,3 +155,32 @@ async def test_merge_conflict_reports_conflict_and_aborts(tmp_path, repo):
     with pytest.raises(GitError, match="CONFLICT"):  # CONFLICT is on stdout, stderr empty
         await g.merge_no_ff(tmp_path, repo, "ayaan/AY-2", "ayaan/plan-M1")
     assert not (g.repo_dir(tmp_path, "r1") / ".git" / "MERGE_HEAD").exists()
+
+
+async def test_git_command_times_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(g, "GIT_TIMEOUT_S", 0.3)
+    with pytest.raises(GitError, match="timed out"):
+        await g._git(tmp_path, "-c", "alias.hang=!sleep 30", "hang")
+
+
+async def test_git_never_prompts(tmp_path):
+    out = await g._git(tmp_path, "-c", "alias.env=!echo $GIT_SSH_COMMAND", "env")
+    assert "BatchMode=yes" in out
+
+
+def test_git_error_hides_url_credentials():
+    e = GitError("r1", "fetch", "fatal: unable to access 'https://bob:s3cret@host/r.git/'")
+    assert "s3cret" not in str(e) and "https://***@host/r.git" in str(e)
+
+
+async def test_fetch_follows_changed_git_url(tmp_path, repo, origin):
+    await g.ensure_clone(tmp_path, repo)
+    moved = tmp_path / "moved.git"
+    origin.rename(moved)
+    await g.ensure_clone(tmp_path, {**repo, "gitUrl": str(moved)})
+    assert git(tmp_path / ".repos" / "r1", "remote", "get-url", "origin") == str(moved)
+
+
+async def test_delete_branch_without_clone_is_noop(tmp_path, repo):
+    await g.delete_branch(tmp_path, repo, "ayaan/X-1")
+    assert not (tmp_path / ".repos").exists()

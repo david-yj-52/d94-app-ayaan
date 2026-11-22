@@ -374,7 +374,8 @@ class Scheduler:
                     f"{_label(task)}\nTool: {cd}\n재개 {n}/{mx}",
                 )
             try:
-                await self._prepare(task)
+                if not self._legacy(task):
+                    await self._prepare(task)
             except (git.GitError, ValueError) as e:
                 return await self._fail(task, f"prepare: {e}", str(e), session, self.clock())
             res, rows = await self._run_once(task, tool, cfg, session)
@@ -419,6 +420,19 @@ class Scheduler:
         w = next((w for w in ws if w.get("projectKey") == task.get("projectKey")), {})
         return sorted(w.get("repos") or [], key=lambda r: r.get("sortOrd") or 0)
 
+    def _legacy(self, task: dict) -> bool:
+        """Created before worktrees: workspacePath is an old shared clone, not <root>/.tasks/<key>.
+        Such a task runs in place as before (no worktrees, preamble, dirty check or push)."""
+        tasks = self.settings.workspace_root_paths[0] / ".tasks"
+        return Path(task["workspacePath"]).parent != tasks
+
+    async def _repos_in(self, task: dict) -> list[dict]:
+        """Repos with a worktree in the task dir (a repo mapped mid-run has none)."""
+        if self._legacy(task):
+            return []
+        tdir = Path(task["workspacePath"])
+        return [r for r in await self._repos(task) if (tdir / r["repoNm"]).exists()]
+
     async def _prepare(self, task: dict) -> None:
         """One worktree per repo under the task dir, on branch ayaan/<key>. Idempotent."""
         repos = await self._repos(task)
@@ -429,10 +443,13 @@ class Scheduler:
             plan = await self.query.get_plan(task["planId"]) or {}
             if not plan.get("milestoneKey"):
                 raise ValueError(f"plan {task['planId']} has no milestoneKey")
-            start = f"origin/ayaan/plan-{plan['milestoneKey']}"
+            start = f"ayaan/plan-{plan['milestoneKey']}"
         root, key = self.settings.workspace_root_paths[0], _key(task)
         for r in repos:
-            await git.add_worktree(root, r, key, start or f"origin/{r['baseBranch']}")
+            base = f"origin/{r['baseBranch']}"
+            if start:  # a repo mapped after PREPARING gets its plan branch now
+                await git.ensure_branch(root, r, start, base)
+            await git.add_worktree(root, r, key, f"origin/{start}" if start else base)
 
     async def _push_standalone(self, task: dict, repos: list[dict]) -> list[str]:
         """Push ayaan/<key> of every repo with commits; returns repos whose push failed."""
@@ -482,7 +499,8 @@ class Scheduler:
         if session:
             argv, prompt = adapter.resume_argv(session, model), RESUME_PROMPT
         else:  # earlier runs without a session to resume: another tool/session left changes
-            pre = workspace_preamble(await self._repos(task), _key(task))
+            repos = await self._repos_in(task)
+            pre = workspace_preamble(repos, _key(task)) if repos else ""
             argv = adapter.new_argv(model)
             prompt = pre + task["prompt"] + (SWITCH_NOTE if runs else "")
         exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)
@@ -564,7 +582,7 @@ class Scheduler:
         if res.outcome == "CANCELLED":
             return  # the API already moved the task; only the run record is finished
         if res.outcome == "COMPLETED":
-            repos = await self._repos(task)
+            repos = await self._repos_in(task)
             for r in repos:
                 if await git.dirty(Path(task["workspacePath"]) / r["repoNm"]):
                     reason = f"uncommitted changes in {r['repoNm']}"
