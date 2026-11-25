@@ -53,3 +53,11 @@ def test_session_missing_detected():
 
 def test_prompt_in_argv_only_for_cursor():
     assert {t for t, a in ADAPTERS.items() if a.prompt_in_argv} == {"CURSOR"}
+
+
+def test_gemini_daily_quota_message_is_limit():
+    from ayaan.adapters import Gemini
+
+    msg = "You have exhausted your daily quota on this model."
+    ev = Gemini().parse([json.dumps({"type": "error", "message": msg})])
+    assert ev.limit_hit

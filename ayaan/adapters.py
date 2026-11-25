@@ -16,7 +16,9 @@ TESTED_VERSIONS = {
 LIMIT_PATTERNS = {
     "CLAUDE": re.compile(r"hit your limit|usage limit reached", re.I),
     "CODEX": re.compile(r"hit your usage limit", re.I),
-    "GEMINI": re.compile(r"exhausted your capacity|quota will reset", re.I),
+    # capacity/quota-reset: Code Assist; "daily quota": gemini-cli TerminalQuotaError on a PerDay
+    # QuotaFailure (API key and Google login)
+    "GEMINI": re.compile(r"exhausted your (capacity|daily quota)|quota will reset", re.I),
     "CURSOR": re.compile(r"hit your usage limit", re.I),
 }
 SESSION_MISSING = re.compile(
