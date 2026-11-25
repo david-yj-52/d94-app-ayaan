@@ -37,7 +37,7 @@ def test_adapter_parses_fixture(fixture):
 
 
 def test_argv_and_versions():
-    assert set(ADAPTERS) == {"CLAUDE", "CODEX", "GEMINI", "CURSOR", "FAKE"}
+    assert set(ADAPTERS) == {"CLAUDE", "CODEX", "GEMINI", "CURSOR", "ANTIGRAVITY", "FAKE"}
     assert set(TESTED_VERSIONS) >= {"CLAUDE", "CODEX", "GEMINI"}
     c = ADAPTERS["CLAUDE"]
     assert "--dangerously-skip-permissions" in c.new_argv(None)

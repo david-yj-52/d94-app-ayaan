@@ -503,7 +503,8 @@ class Scheduler:
             pre = workspace_preamble(repos, _key(task)) if repos else ""
             argv = adapter.new_argv(model)
             prompt = pre + task["prompt"] + (SWITCH_NOTE if runs else "")
-        exe = sys.executable if cd == "FAKE" else resolve_exe(cd, self.settings)
+        # FAKE and ANTIGRAVITY are python modules (-m) run on the ayaan interpreter
+        exe = sys.executable if cd in ("FAKE", "ANTIGRAVITY") else resolve_exe(cd, self.settings)
         data_dir = Path(self.settings.data_dir)
         log_path = data_dir / "logs" / tid / f"{seq}.log"
         env = self._env(tool)

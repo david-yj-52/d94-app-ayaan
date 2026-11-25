@@ -11,6 +11,7 @@ TESTED_VERSIONS = {
     "CODEX": "0.167.1",
     "GEMINI": "0.68.0",
     "CURSOR": "unverified",
+    "ANTIGRAVITY": "2.35.1",  # desktop app version (ayaan.antigravity talks to its server)
 }
 
 LIMIT_PATTERNS = {
@@ -20,6 +21,8 @@ LIMIT_PATTERNS = {
     # QuotaFailure (API key and Google login)
     "GEMINI": re.compile(r"exhausted your (capacity|daily quota)|quota will reset", re.I),
     "CURSOR": re.compile(r"hit your usage limit", re.I),
+    # ponytail: real quota-exhausted text not captured yet (Google error vocabulary guessed)
+    "ANTIGRAVITY": re.compile(r"quota|resource.?exhausted|rate.?limit", re.I),
 }
 SESSION_MISSING = re.compile(
     r"no conversation found|session .*not found|no (saved )?session|no rollout found", re.I
@@ -236,7 +239,20 @@ class Cursor:
                 if o.get("is_error"):
                     errs.append(result)
         ev.json_seen = bool(objs)
-        return _finish("CURSOR", ev, errs, result)
+        return _finish(self.tool, ev, errs, result)
+
+
+class Antigravity(Cursor):
+    """Runs ayaan.antigravity on the ayaan interpreter (same JSON lines as Cursor's result)."""
+
+    prompt_in_argv = False
+    tool = "ANTIGRAVITY"
+
+    def new_argv(self, model):
+        return ["-m", "ayaan.antigravity"] + (["--model", model] if model else [])
+
+    def resume_argv(self, session_id, model):
+        return self.new_argv(model) + ["--resume", session_id]
 
 
 class Fake:
@@ -258,5 +274,6 @@ ADAPTERS = {
     "CODEX": Codex(),
     "GEMINI": Gemini(),
     "CURSOR": Cursor(),
+    "ANTIGRAVITY": Antigravity(),
     "FAKE": Fake(),
 }

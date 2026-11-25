@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
-TOOLS = {"CLAUDE", "CODEX", "GEMINI", "CURSOR", "FAKE"}
+TOOLS = {"CLAUDE", "CODEX", "GEMINI", "CURSOR", "ANTIGRAVITY", "FAKE"}
 NOTIFY = {
     "PAUSED",
     "RESUMED",

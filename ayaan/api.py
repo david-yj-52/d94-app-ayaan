@@ -408,6 +408,8 @@ def create_app(
     @r.put("/tools/{cd}")
     async def put_tool(cd: str, body: dict[str, Any] = Body(...)):
         current = next((t for t in await query.get_tools() or [] if t["toolCd"] == cd), None)
+        if current is None and cd in TOOLS:  # added after the d94-query seed (ANTIGRAVITY)
+            current = {"toolCd": cd, "enabled": False, "authMode": "ACCOUNT", "maxConcurrency": 1}
         if current is None:
             raise ApiError(404, f"unknown tool: {cd}")
         body.pop("toolCd", None)

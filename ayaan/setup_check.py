@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from ayaan import antigravity
 from ayaan.adapters import TESTED_VERSIONS
 from ayaan.scheduler import EXE_MISSING
 from ayaan.settings import (
@@ -114,7 +115,7 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
     enabled_cds = {t["toolCd"] for t in enabled}
 
     # 1. CLI version + login
-    cli = [t for t in enabled if t["toolCd"] != "FAKE"]
+    cli = [t for t in enabled if t["toolCd"] not in ("FAKE", "ANTIGRAVITY")]
     exes = {t["toolCd"]: resolve_exe(t["toolCd"], settings) for t in cli}
     step1 = list(await asyncio.gather(*(_version(cd, exe) for cd, exe in exes.items())))
     for t in cli:
@@ -126,6 +127,15 @@ async def run_setup_check(query, settings: Settings) -> list[dict]:
             )
             step1.append(
                 _item(f"{t['toolCd']} login", found, "logged in" if found else "not logged in")
+            )
+
+    if "ANTIGRAVITY" in enabled_cds:
+        try:
+            antigravity.ls_address()
+            step1.append(_item("ANTIGRAVITY app", True, "running (log in inside the app)"))
+        except antigravity.Unavailable:
+            step1.append(
+                _item("ANTIGRAVITY app", False, "not running: open Antigravity and log in")
             )
 
     # 2. API key variables (presence only)

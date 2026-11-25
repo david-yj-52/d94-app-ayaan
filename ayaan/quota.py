@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from ayaan import antigravity
 from ayaan.adapters import RunEvent
 from ayaan.clients import EccClient, QueryClient, from_query_ts, to_query_ts
 from ayaan.rules import resolve_resume_at
@@ -214,6 +215,23 @@ async def collect_gemini(
     return [_row("GEMINI", "DAILY", used, at, "USAGE_API", datetime.now(UTC))]
 
 
+async def collect_antigravity(http: httpx.AsyncClient, model: str | None = None) -> list[dict]:
+    """Per-model quota from the running Antigravity app's language server (GetUserStatus)."""
+    try:
+        status = await antigravity.rpc_async(http, "GetUserStatus", {"metadata": antigravity._META})
+    except (antigravity.Unavailable, httpx.HTTPError, ValueError) as e:
+        raise QuotaUnavailable(type(e).__name__) from None
+    cfg = antigravity.pick_model(antigravity.model_configs(status), model)
+    q = (cfg or {}).get("quotaInfo") or {}
+    if q.get("remainingFraction") is None:
+        return []
+    # ponytail: one row for the tool's model (else the least-used Flash, the one runs default to);
+    # WEEKLY because free-plan buckets reset ~7 days out. Per-model rows if the UI needs them.
+    at = from_query_ts(q["resetTime"]) if q.get("resetTime") else None
+    used = round((1 - float(q["remainingFraction"])) * 100, 1)
+    return [_row("ANTIGRAVITY", "WEEKLY", used, at, "USAGE_API", datetime.now(UTC))]
+
+
 def collect_codex(sessions_dir: Path) -> list[dict]:
     files = [f for f in Path(sessions_dir).glob("**/*.jsonl") if f.is_file()]
     if not files:
@@ -389,4 +407,13 @@ async def collect_all(
             continue
         if rows:
             await apply_quotas(query, ecc, cd, rows, events)
+    t = tools.get("ANTIGRAVITY") or {}
+    if t.get("enabled"):
+        try:
+            async with httpx.AsyncClient() as http:
+                rows = await collect_antigravity(http, t.get("model"))
+            if rows:
+                await apply_quotas(query, ecc, "ANTIGRAVITY", rows, events)
+        except QuotaUnavailable as e:
+            log.warning("antigravity usage poll failed: %s", e)
     return warnings
