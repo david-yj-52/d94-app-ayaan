@@ -85,7 +85,46 @@ def resolve_exe(name: str, settings: Settings) -> str | None:
 
 def claude_keychain_credentials() -> str | None:
     """macOS claude stores its login in the Keychain, not ~/.claude/.credentials.json."""
-    return _keychain_password("Claude Code-credentials")
+    return _keychain_password(CLAUDE_KEYCHAIN_SERVICE)
+
+
+CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def write_claude_keychain_credentials(value: str) -> None:
+    """Store refreshed credentials where the claude CLI keeps them (it uses `security` too).
+    ponytail: the JSON passes through argv for a moment (same uid only); upgrade path is a
+    Keychain binding if that matters."""
+    r = subprocess.run(
+        ["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    acct = next(
+        (
+            ln.split('="', 1)[1].rstrip('"')
+            for ln in r.stdout.splitlines()
+            if '"acct"<blob>="' in ln
+        ),
+        os.environ.get("USER", ""),
+    )
+    subprocess.run(
+        [
+            "security",
+            "add-generic-password",
+            "-U",
+            "-s",
+            CLAUDE_KEYCHAIN_SERVICE,
+            "-a",
+            acct,
+            "-w",
+            value,
+        ],
+        check=True,
+        capture_output=True,
+        timeout=5,
+    )
 
 
 def _keychain_password(service: str) -> str | None:

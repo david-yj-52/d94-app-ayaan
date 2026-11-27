@@ -16,11 +16,18 @@ from ayaan import antigravity
 from ayaan.adapters import RunEvent
 from ayaan.clients import EccClient, QueryClient, from_query_ts, to_query_ts
 from ayaan.rules import resolve_resume_at
-from ayaan.settings import Settings, claude_keychain_credentials, cursor_keychain_token
+from ayaan.settings import (
+    Settings,
+    claude_keychain_credentials,
+    cursor_keychain_token,
+    write_claude_keychain_credentials,
+)
 
 log = logging.getLogger(__name__)
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # claude CLI's public OAuth client
 CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 GEMINI_API = "https://cloudcode-pa.googleapis.com/v1internal:"
 _GEMINI_CONST = re.compile(r'var (OAUTH_CLIENT_(?:ID|SECRET)) = "([^"]+)"')
@@ -29,6 +36,9 @@ _GEMINI_META = {
     "platform": "PLATFORM_UNSPECIFIED",
     "pluginType": "GEMINI",
 }
+CLAUDE_TRANSIENT_WARNING = (
+    "Claude usage 조회 실패 — 다음 주기에 다시 시도 (로그인 만료면 claude 재로그인)"
+)
 CLAUDE_WARNING = "Claude 비공식 usage 조회 실패 — 자동으로 껐습니다 (실행 결과 기반으로만 갱신)"
 _WINDOW_KO = {
     "FIVE_HOUR": "5시간",
@@ -41,7 +51,9 @@ _NAMES = {"five_hour": "FIVE_HOUR", "seven_day": "WEEKLY", "weekly": "WEEKLY"}
 
 
 class QuotaUnavailable(Exception):
-    pass
+    def __init__(self, msg: str = "", transient: bool = False):
+        super().__init__(msg)
+        self.transient = transient  # expired login, network, 429/5xx: retry next poll
 
 
 def _row(tool, window, used_pct, resets_at, source, now, **extra) -> dict:
@@ -71,21 +83,63 @@ def _window_from_minutes(minutes) -> str | None:
     return None
 
 
-def _token(path: Path) -> str:
+def _claude_creds(path: Path) -> dict:
     raw = path.read_text() if path.is_file() else claude_keychain_credentials()
     if not raw:
         raise QuotaUnavailable("no credentials")
-    data = json.loads(raw)
-    tok = (data.get("claudeAiOauth") or data).get("accessToken")
-    if not tok:
+    return json.loads(raw)
+
+
+def _save_claude_creds(path: Path, data: dict) -> None:
+    text = json.dumps(data)
+    if path.is_file():
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(text)
+        tmp.chmod(0o600)
+        tmp.replace(path)
+    else:
+        write_claude_keychain_credentials(text)
+
+
+async def _claude_access_token(http: httpx.AsyncClient, path: Path) -> str:
+    """The stored access token, refreshed like the claude CLI does once it has expired.
+    The CLI only refreshes while it runs, so between CLAUDE tasks the 8h token goes stale and
+    the usage API answers 401. The rotated refresh token must be written back, or the CLI's
+    own copy stops working."""
+    data = _claude_creds(path)
+    o = data.get("claudeAiOauth") or data
+    if not o.get("accessToken"):
         raise QuotaUnavailable("no access token")
-    return tok
+    if (o.get("expiresAt") or 0) / 1000 > time.time() + 60 or not o.get("refreshToken"):
+        return o["accessToken"]
+    resp = await http.post(
+        CLAUDE_TOKEN_URL,
+        json={
+            "grant_type": "refresh_token",
+            "refresh_token": o["refreshToken"],
+            "client_id": CLAUDE_CLIENT_ID,
+            "scope": " ".join(o.get("scopes") or []),
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    t = resp.json()
+    # ponytail: the CLI may have refreshed meanwhile; keep its copy instead of overwriting
+    cur = _claude_creds(path)
+    co = cur.get("claudeAiOauth") or cur
+    if co.get("refreshToken") != o["refreshToken"]:
+        return co["accessToken"]
+    co["accessToken"] = t["access_token"]
+    co["refreshToken"] = t.get("refresh_token") or co["refreshToken"]
+    co["expiresAt"] = int((time.time() + int(t.get("expires_in") or 3600)) * 1000)
+    _save_claude_creds(path, cur)
+    return co["accessToken"]
 
 
 async def collect_claude(http: httpx.AsyncClient, credentials_path: Path) -> list[dict]:
     try:
         headers = {
-            "Authorization": f"Bearer {_token(credentials_path)}",
+            "Authorization": f"Bearer {await _claude_access_token(http, credentials_path)}",
             "anthropic-beta": "oauth-2025-04-20",
         }
         resp = await http.get(USAGE_URL, headers=headers, timeout=10)
@@ -101,7 +155,12 @@ async def collect_claude(http: httpx.AsyncClient, credentials_path: Path) -> lis
             rows.append(_row("CLAUDE", window, float(w["utilization"]), at, "USAGE_API", now))
     except QuotaUnavailable:
         raise
-    except Exception as e:  # never include the token / request headers
+    except httpx.HTTPStatusError as e:  # never include the token / request headers
+        code = e.response.status_code
+        raise QuotaUnavailable(f"HTTP {code}", transient=code in (400, 401, 429) or code >= 500)
+    except httpx.TransportError as e:
+        raise QuotaUnavailable(type(e).__name__, transient=True) from None
+    except Exception as e:
         raise QuotaUnavailable(type(e).__name__) from None
     if not rows:
         raise QuotaUnavailable("no usable windows")
@@ -325,11 +384,11 @@ def expire_past_resets(rows: list[dict], now: datetime) -> list[dict]:
     out = []
     for r in rows:
         if (
-            r.get("status") == "EXHAUSTED"
+            r.get("status") in ("EXHAUSTED", "AVAILABLE")
             and r.get("resetsAt")
             and from_query_ts(r["resetsAt"]) <= now
-        ):
-            r = {**r, "status": "UNKNOWN"}
+        ):  # the window rolled over: the old % no longer means anything
+            r = {**r, "status": "UNKNOWN", "usedPct": None}
         out.append(r)
     return out
 
@@ -385,8 +444,11 @@ async def collect_all(
             await apply_quotas(query, ecc, "CLAUDE", rows, events)
         except QuotaUnavailable as e:
             log.warning("claude usage poll failed: %s", e)
-            await query.put_config({"CLAUDE_USAGE_POLL": "false"})
-            warnings.append(CLAUDE_WARNING)
+            if e.transient:  # expired/revoked login or outage: keep polling, say why
+                warnings.append(f"{CLAUDE_TRANSIENT_WARNING} ({e})")
+            else:  # the unofficial endpoint itself changed: stop hammering it
+                await query.put_config({"CLAUDE_USAGE_POLL": "false"})
+                warnings.append(CLAUDE_WARNING)
     if tools.get("CODEX", {}).get("enabled"):
         rows = collect_codex(Path(settings.codex_sessions_dir))
         if rows:

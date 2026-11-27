@@ -83,24 +83,75 @@ async def test_claude_usage_maps_windows(tmp_path):
     assert by["WEEKLY"]["usedPct"] == 47.0 and by["WEEKLY"]["status"] == "AVAILABLE"
 
 
-async def test_claude_failure_disables_poll(tmp_path):
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(401))) as h:
-        try:
-            await collect_claude(h, creds(tmp_path))
-            raise AssertionError
-        except QuotaUnavailable:
-            pass
+async def test_claude_poll_disable_only_when_endpoint_breaks(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    monkeypatch.setattr(q, "claude_keychain_credentials", lambda: None)  # never the real login
+    for code, transient in ((401, True), (429, True), (503, True), (404, False)):
+        t = httpx.MockTransport(lambda r, c=code: httpx.Response(c))
+        async with httpx.AsyncClient(transport=t) as h:
+            try:
+                await collect_claude(h, creds(tmp_path))
+                raise AssertionError
+            except QuotaUnavailable as e:
+                assert e.transient is transient, code
     query = FakeQuery(
         config={"CLAUDE_USAGE_POLL": "true"}, tools=[{"toolCd": "CLAUDE", "enabled": True}]
     )
     s = Settings(
         claude_credentials_path=str(tmp_path / "missing.json"), codex_sessions_dir=str(tmp_path)
     )
-    warns = await collect_all(query, FakeEcc(), s, NOW)
+    warns = await collect_all(query, FakeEcc(), s, NOW)  # no credentials: not transient
     assert query.config["CLAUDE_USAGE_POLL"] == "false"
     assert warns == [
         "Claude 비공식 usage 조회 실패 — 자동으로 껐습니다 (실행 결과 기반으로만 갱신)"
     ]
+
+
+async def test_claude_expired_token_is_refreshed_and_written_back(tmp_path, monkeypatch):
+    import ayaan.quota as q
+
+    monkeypatch.setattr(q, "claude_keychain_credentials", lambda: None)
+    p = tmp_path / "c.json"
+    p.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "old",
+                    "refreshToken": "rt1",
+                    "expiresAt": 0,
+                    "scopes": ["a", "b"],
+                    "subscriptionType": "pro",
+                },
+                "mcpOAuth": {"x": 1},
+            }
+        )
+    )
+    calls = []
+
+    def handler(req):
+        calls.append((req.url.host, req.headers.get("authorization")))
+        if req.url.host == "platform.claude.com":
+            body = json.loads(req.content)
+            assert body == {
+                "grant_type": "refresh_token",
+                "refresh_token": "rt1",
+                "client_id": q.CLAUDE_CLIENT_ID,
+                "scope": "a b",
+            }
+            return httpx.Response(
+                200, json={"access_token": "new", "refresh_token": "rt2", "expires_in": 28800}
+            )
+        return httpx.Response(200, json={"five_hour": {"utilization": 62, "resets_at": None}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as h:
+        [row] = await collect_claude(h, p)
+    assert calls[1] == ("api.anthropic.com", "Bearer new") and row["usedPct"] == 62.0
+    saved = json.loads(p.read_text())
+    o = saved["claudeAiOauth"]
+    assert (o["accessToken"], o["refreshToken"], o["subscriptionType"]) == ("new", "rt2", "pro")
+    assert o["expiresAt"] > 0 and saved["mcpOAuth"] == {"x": 1}
+    assert oct(p.stat().st_mode & 0o777) == "0o600"
 
 
 def test_codex_reads_latest_session_snake_and_camel(tmp_path):
@@ -198,6 +249,9 @@ def test_expired_reset_becomes_unknown():
         {"status": "EXHAUSTED", "resetsAt": "2026-11-11T13:00:00"},
     ]
     assert [r["status"] for r in expire_past_resets(rows, NOW)] == ["UNKNOWN", "EXHAUSTED"]
+    stale = {"status": "AVAILABLE", "usedPct": 37.0, "resetsAt": "2026-11-11T11:00:00"}
+    [r] = expire_past_resets([stale], NOW)  # rolled window: old % is shown as unknown
+    assert (r["status"], r["usedPct"]) == ("UNKNOWN", None)
 
 
 def test_codex_free_plan_30_day_window_is_monthly(tmp_path):
@@ -310,16 +364,16 @@ def test_cursor_token_falls_back_to_keychain(tmp_path, monkeypatch):
         pass
 
 
-def test_claude_token_falls_back_to_keychain(tmp_path, monkeypatch):
+async def test_claude_token_falls_back_to_keychain(tmp_path, monkeypatch):
     import ayaan.quota as q
 
-    monkeypatch.setattr(
-        q, "claude_keychain_credentials", lambda: '{"claudeAiOauth": {"accessToken": "kc"}}'
-    )
-    assert q._token(tmp_path / "missing.json") == "kc"
-    monkeypatch.setattr(q, "claude_keychain_credentials", lambda: None)
-    try:
-        q._token(tmp_path / "missing.json")
-        raise AssertionError
-    except QuotaUnavailable:
-        pass
+    kc = '{"claudeAiOauth": {"accessToken": "kc", "expiresAt": 99999999999999}}'
+    monkeypatch.setattr(q, "claude_keychain_credentials", lambda: kc)
+    async with httpx.AsyncClient() as h:
+        assert await q._claude_access_token(h, tmp_path / "missing.json") == "kc"
+        monkeypatch.setattr(q, "claude_keychain_credentials", lambda: None)
+        try:
+            await q._claude_access_token(h, tmp_path / "missing.json")
+            raise AssertionError
+        except QuotaUnavailable:
+            pass
